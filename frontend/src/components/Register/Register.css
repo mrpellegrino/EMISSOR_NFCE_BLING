@@ -1,0 +1,260 @@
+/* Container Principal */
+.register-container {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  padding: 20px;
+}
+
+/* Card de Registro */
+.register-card {
+  background: #ffffff;
+  border-radius: 20px;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+  padding: 40px;
+  width: 100%;
+  max-width: 420px;
+  animation: slideUp 0.5s ease-out;
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(30px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Header */
+.register-header {
+  text-align: center;
+  margin-bottom: 32px;
+}
+
+.register-logo {
+  width: 64px;
+  height: 64px;
+  margin: 0 auto 16px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  border-radius: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+}
+
+.register-logo svg {
+  width: 36px;
+  height: 36px;
+}
+
+.register-header h1 {
+  font-size: 24px;
+  font-weight: 700;
+  color: #1f2937;
+  margin: 0 0 8px 0;
+}
+
+.register-header p {
+  font-size: 14px;
+  color: #6b7280;
+  margin: 0;
+}
+
+/* Form */
+.register-form {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+/* Error Message */
+.register-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 10px;
+  color: #dc2626;
+  font-size: 14px;
+}
+
+.register-error svg {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+/* Form Group */
+.register-form .form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.register-form .form-group label {
+  font-size: 14px;
+  font-weight: 600;
+  color: #374151;
+}
+
+/* Input Wrapper */
+.register-form .input-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.register-form .input-icon {
+  position: absolute;
+  left: 14px;
+  width: 20px;
+  height: 20px;
+  color: #9ca3af;
+  pointer-events: none;
+}
+
+.register-form .input-wrapper input {
+  width: 100%;
+  padding: 14px 14px 14px 44px;
+  border: 2px solid #e5e7eb;
+  border-radius: 12px;
+  font-size: 15px;
+  color: #1f2937;
+  background: #f9fafb;
+  transition: all 0.2s ease;
+}
+
+.register-form .input-wrapper input:focus {
+  outline: none;
+  border-color: #667eea;
+  background: #ffffff;
+  box-shadow: 0 0 0 4px rgba(102, 126, 234, 0.1);
+}
+
+.register-form .input-wrapper input::placeholder {
+  color: #9ca3af;
+}
+
+.register-form .input-wrapper input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Password Toggle */
+.register-form .password-toggle {
+  position: absolute;
+  right: 14px;
+  background: none;
+  border: none;
+  padding: 4px;
+  cursor: pointer;
+  color: #9ca3af;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.2s ease;
+}
+
+.register-form .password-toggle:hover {
+  color: #667eea;
+}
+
+.register-form .password-toggle svg {
+  width: 20px;
+  height: 20px;
+}
+
+/* Register Button */
+.register-button {
+  width: 100%;
+  padding: 14px 24px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  border: none;
+  border-radius: 12px;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  transition: all 0.3s ease;
+  box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+  margin-top: 8px;
+}
+
+.register-button:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(102, 126, 234, 0.5);
+}
+
+.register-button:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.register-button:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+/* Spinner */
+.register-form .spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Footer */
+.register-footer {
+  text-align: center;
+  margin-top: 24px;
+  padding-top: 24px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.register-footer p {
+  font-size: 14px;
+  color: #6b7280;
+  margin: 0;
+}
+
+.register-footer a {
+  color: #667eea;
+  text-decoration: none;
+  font-weight: 600;
+  transition: color 0.2s ease;
+}
+
+.register-footer a:hover {
+  color: #764ba2;
+  text-decoration: underline;
+}
+
+/* Responsive */
+@media (max-width: 480px) {
+  .register-card {
+    padding: 30px 24px;
+  }
+
+  .register-header h1 {
+    font-size: 22px;
+  }
+}

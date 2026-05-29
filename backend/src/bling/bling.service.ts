@@ -43,25 +43,23 @@ interface BlingConfig {
 @Injectable()
 export class BlingService {
   private readonly logger = new Logger(BlingService.name);
+  private static readonly BLING_REQUEST_INTERVAL_MS = 500; // Limite da API: 3 req/s (com margem)
   private readonly config: BlingConfig;
   private tokens: BlingTokens | null = null;
+  private lastBlingRequestAt = 0;
+  private blingRateLimitChain: Promise<void> = Promise.resolve();
 
   // Códigos de serviços disponíveis
   private readonly codigosServico = {
-    '85112': {
-      codigo: '8.01',
-      descricao: 'Prestação de serviços de Educação infantil - pré-escola',
-      tipo: 'EDUCACAO_INFANTIL'
-    },
-    '85139': {
-      codigo: '8.01.01',
-      descricao: 'Prestação de serviços de educação - Ensino fundamental',
-      tipo: 'ENSINO_FUNDAMENTAL'
+    '050801': {
+      codigo: '050801',
+      descricao: 'Serviços de Estética Animal (banho e tosa)',
+      tipo: 'ESTETICA_ANIMAL'
     }
   };
 
   // Código de serviço padrão (pode ser alterado via configuração)
-  private codigoServicoAtual = '85139';
+  private codigoServicoAtual = '050801';
 
   // Parcela atual (pode ser alterada via configuração)
   private parcelaAtual = Math.min(Math.max(new Date().getMonth() + 1, 1), 12);
@@ -88,6 +86,26 @@ export class BlingService {
 
     // Carregar tokens existentes na inicialização
     this.loadTokens();
+  }
+
+  private async sleep(ms: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private async waitForBlingRateLimit(): Promise<void> {
+    const limiter = async () => {
+      const elapsed = Date.now() - this.lastBlingRequestAt;
+      const waitMs = BlingService.BLING_REQUEST_INTERVAL_MS - elapsed;
+
+      if (waitMs > 0) {
+        await this.sleep(waitMs);
+      }
+
+      this.lastBlingRequestAt = Date.now();
+    };
+
+    this.blingRateLimitChain = this.blingRateLimitChain.then(limiter, limiter);
+    await this.blingRateLimitChain;
   }
 
   private getCredentialsPath(): string {
@@ -416,6 +434,8 @@ export class BlingService {
       console.log('Body:', options.body);
     }
     console.log('========================');
+
+    await this.waitForBlingRateLimit();
 
     const response = await fetch(url, {
       ...options,
@@ -962,6 +982,8 @@ export class BlingService {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 segundos timeout
 
+      await this.waitForBlingRateLimit();
+
       const response = await fetch(
         `${apiUrl}/contatos/${id}`,
         {
@@ -1187,11 +1209,19 @@ export class BlingService {
       baseCalculo: valor,
       reterISS: false,
       desconto: 0,
+      tributacaoIbsCbs: {
+        indicadorOperacao: "050101",
+        tipoOperacao: "1",
+        tributacao: {
+          classificacaoTributaria: "000001",
+          codigoSituacaoTributaria: "000"
+        }
+      },
 
-      // Serviços (obrigatório) - CÓDIGO DINÂMICO BASEADO NA CONFIGURAÇÃO
+      // Serviços (obrigatório) - serviço único configurado
       servicos: [{
         codigo: this.codigosServico[this.codigoServicoAtual].codigo,
-        descricao: `${this.codigosServico[this.codigoServicoAtual].descricao} - PARCELA ${parcelaParaUsar} - Aluno: ${duplicata.nomeAluno} - Turma: ${duplicata.turma}`,
+        descricao: this.codigosServico[this.codigoServicoAtual].descricao,
         valor: valor
       }],
 
@@ -1199,7 +1229,7 @@ export class BlingService {
       parcelas: [{
         data: currentDate,
         valor: valor,
-        observacoes: `PARCELA ${parcelaParaUsar} - Referente aos serviços educacionais do aluno ${duplicata.nomeAluno}`,
+        observacoes: `PARCELA ${parcelaParaUsar} - Referente a ${this.codigosServico[this.codigoServicoAtual].descricao}`,
         formaPagamento: {
           id: 1 // ID da forma de pagamento
         }
@@ -1559,6 +1589,14 @@ export class BlingService {
       baseCalculo: valorTotal,
       reterISS: false,
       desconto: 0,
+      tributacaoIbsCbs: {
+        indicadorOperacao: "050101",
+        tipoOperacao: "1",
+        tributacao: {
+          classificacaoTributaria: "000001",
+          codigoSituacaoTributaria: "000"
+        }
+      },
       
       // Contato - NotasServicosContatoBaseDTO (obrigatórios: id, nome, numeroDocumento, email)
       // + NotasServicosContatoDTO (opcionais: ie, telefone, im, endereco)
@@ -1570,11 +1608,11 @@ export class BlingService {
       },
       
       // Serviços - NotasServicosServicoDTO (obrigatórios: codigo, descricao, valor)
-      servicos: servicos.map(s => ({
-        codigo: "5.08", // Código de serviço LC 116
-        descricao: s.descricao,
-        valor: parseFloat(s.valor || 0)
-      })),
+      servicos: [{
+        codigo: "050801", // Código de serviço
+        descricao: "Serviços de Estética Animal (banho e tosa)",
+        valor: valorTotal
+      }],
       
       // Parcelas - NotasServicosParcelaDTO (obrigatórios: data, valor)
       parcelas: [{

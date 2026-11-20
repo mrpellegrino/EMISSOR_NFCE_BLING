@@ -1,0 +1,74 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USERNAME:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-emissor_nfce_1234}
+      POSTGRES_DB: ${DB_NAME:-emissor_nfce}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-postgres} -d ${DB_NAME:-emissor_nfce}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: https://github.com/mrpellegrino/vila-pet-office-backend.git#main
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USERNAME: ${DB_USERNAME:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-emissor_nfce_1234}
+      DB_NAME: ${DB_NAME:-emissor_nfce}
+      JWT_SECRET: ${JWT_SECRET:-change-this-jwt-secret-in-production}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-1d}
+      BLING_CLIENT_ID: ${BLING_CLIENT_ID:-}
+      BLING_CLIENT_SECRET: ${BLING_CLIENT_SECRET:-}
+      BLING_REDIRECT_URI: ${BLING_REDIRECT_URI:-https://seu-dominio.com/api/bling/callback}
+      BLING_API_BASE_URL: https://api.bling.com.br
+      BLING_API_URL: https://api.bling.com.br/Api/v3
+      BLING_AUTHORIZATION_URL: https://www.bling.com.br/Api/v3/oauth/authorize
+      BLING_TOKEN_URL: https://www.bling.com.br/Api/v3/oauth/token
+      TOKENS_FILE: /app/data/tokens.json
+      FRONTEND_URL: ${FRONTEND_URL:-https://seu-dominio.com}
+      AUTO_RPS_ENABLED: ${AUTO_RPS_ENABLED:-true}
+      AUTH_USER: ${AUTH_USER:-admin@vilapet.com.br}
+      AUTH_PASSWORD: ${AUTH_PASSWORD:-VilaPet#Office!2026}
+      AUTH_USER_NAME: ${AUTH_USER_NAME:-Vila Pet Office}
+      MCP_API_KEY: ${MCP_API_KEY:-vilapet-hermes-mcp-key}
+      LOGIN_MAX_ATTEMPTS: ${LOGIN_MAX_ATTEMPTS:-5}
+      LOGIN_ACCOUNT_MAX_ATTEMPTS: ${LOGIN_ACCOUNT_MAX_ATTEMPTS:-10}
+      LOGIN_WINDOW_MINUTES: ${LOGIN_WINDOW_MINUTES:-15}
+      LOGIN_LOCKOUT_MINUTES: ${LOGIN_LOCKOUT_MINUTES:-15}
+    volumes:
+      - backend_data:/app/data
+    expose:
+      - "3000"
+
+  frontend:
+    build:
+      context: https://github.com/mrpellegrino/vila-pet-office-frontend.git#main
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-/api}
+    restart: unless-stopped
+    environment:
+      BACKEND_HOST: backend
+    depends_on:
+      - backend
+    expose:
+      - "80"
+
+volumes:
+  postgres_data:
+  backend_data:

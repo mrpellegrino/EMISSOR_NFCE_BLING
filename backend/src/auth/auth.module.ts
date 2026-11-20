@@ -6,6 +6,8 @@ import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { UsersModule } from '../users/users.module';
+import { AuthenticateWithEnvCredentialsUseCase } from './usecases/authenticate-with-env-credentials.usecase';
+import { LoginBruteForceGuardUseCase } from './usecases/login-brute-force-guard.usecase';
 
 @Module({
   imports: [
@@ -23,7 +25,16 @@ import { UsersModule } from '../users/users.module';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy],
-  exports: [AuthService],
+  providers: [
+    AuthService,
+    LoginBruteForceGuardUseCase,
+    AuthenticateWithEnvCredentialsUseCase,
+    JwtStrategy,
+  ],
+  exports: [
+    AuthService,
+    LoginBruteForceGuardUseCase,
+    AuthenticateWithEnvCredentialsUseCase,
+  ],
 })
 export class AuthModule {}

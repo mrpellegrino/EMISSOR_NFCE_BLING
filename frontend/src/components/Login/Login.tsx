@@ -1,5 +1,5 @@
-import { useState, type FormEvent } from 'react';
-import { authApi } from '../../services/authApi';
+import { useState, useEffect, type FormEvent } from 'react';
+import { authApi, AuthApiError } from '../../services/authApi';
 import './Login.css';
 
 interface LoginProps {
@@ -7,15 +7,42 @@ interface LoginProps {
   onGoToRegister?: () => void;
 }
 
-function Login({ onLoginSuccess, onGoToRegister }: LoginProps) {
+function formatCountdown(seconds: number): string {
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  if (mins === 0) return `${secs}s`;
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+}
+
+function Login({ onLoginSuccess }: LoginProps) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
+  const [lockoutSeconds, setLockoutSeconds] = useState(0);
+
+  const isLockedOut = lockoutSeconds > 0;
+
+  useEffect(() => {
+    if (!isLockedOut) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      setLockoutSeconds((prev) => {
+        if (prev <= 1) {
+          setError('');
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [isLockedOut]);
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    if (lockoutSeconds > 0) return;
     setError('');
     
     if (!email || !password) {
@@ -34,6 +61,13 @@ function Login({ onLoginSuccess, onGoToRegister }: LoginProps) {
         onLoginSuccess(response.user);
       }
     } catch (err) {
+      if (
+        err instanceof AuthApiError &&
+        err.statusCode === 429 &&
+        err.retryAfterSeconds
+      ) {
+        setLockoutSeconds(Math.max(1, Math.ceil(err.retryAfterSeconds)));
+      }
       const errorMessage = err instanceof Error ? err.message : 'Erro ao realizar login. Tente novamente.';
       setError(errorMessage);
     } finally {
@@ -52,36 +86,40 @@ function Login({ onLoginSuccess, onGoToRegister }: LoginProps) {
               <path d="M2 12L12 17L22 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
             </svg>
           </div>
-          <h1>Emissor NFC-e</h1>
-          <p>Faça login para acessar o sistema</p>
+          <h1>Vila Pet Office</h1>
+          <p>Faça login para acessar a plataforma de gestão</p>
         </div>
 
         <form className="login-form" onSubmit={handleSubmit}>
-          {error && (
+          {(error || isLockedOut) && (
             <div className="login-error">
               <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                 <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2"/>
                 <path d="M12 8V12" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
                 <circle cx="12" cy="16" r="1" fill="currentColor"/>
               </svg>
-              <span>{error}</span>
+              <span>
+                {isLockedOut
+                  ? `Muitas tentativas incorretas. Login bloqueado por ${formatCountdown(lockoutSeconds)}.`
+                  : error}
+              </span>
             </div>
           )}
 
           <div className="form-group">
-            <label htmlFor="email">E-mail</label>
+            <label htmlFor="email">Usuário ou E-mail</label>
             <div className="input-wrapper">
               <svg className="input-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                 <path d="M4 4H20C21.1 4 22 4.9 22 6V18C22 19.1 21.1 20 20 20H4C2.9 20 2 19.1 2 18V6C2 4.9 2.9 4 4 4Z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
                 <path d="M22 6L12 13L2 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
               </svg>
               <input
-                type="email"
+                type="text"
                 id="email"
-                placeholder="seu@email.com"
+                placeholder="admin@vilapet.com.br"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                disabled={isLoading}
+                disabled={isLoading || isLockedOut}
               />
             </div>
           </div>
@@ -99,7 +137,7 @@ function Login({ onLoginSuccess, onGoToRegister }: LoginProps) {
                 placeholder="••••••••"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                disabled={isLoading}
+                disabled={isLoading || isLockedOut}
               />
               <button
                 type="button"
@@ -131,21 +169,19 @@ function Login({ onLoginSuccess, onGoToRegister }: LoginProps) {
             <a href="#" className="forgot-password">Esqueceu a senha?</a>
           </div>
 
-          <button type="submit" className="login-button" disabled={isLoading}>
+          <button type="submit" className="login-button" disabled={isLoading || isLockedOut}>
             {isLoading ? (
               <>
                 <span className="spinner"></span>
                 Entrando...
               </>
+            ) : isLockedOut ? (
+              `Bloqueado (${formatCountdown(lockoutSeconds)})`
             ) : (
               'Entrar'
             )}
           </button>
         </form>
-
-        <div className="login-footer">
-          <p>Não tem uma conta? <a href="#" onClick={(e) => { e.preventDefault(); onGoToRegister?.(); }}>Cadastre-se</a></p>
-        </div>
       </div>
     </div>
   );

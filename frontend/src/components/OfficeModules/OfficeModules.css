@@ -1,0 +1,274 @@
+.office-page {
+  min-height: 100vh;
+  background: #f3f4f6;
+  padding-bottom: 48px;
+}
+
+.office-header {
+  background: #ffffff;
+  padding: 16px 32px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  position: sticky;
+  top: 0;
+  z-index: 90;
+}
+
+.office-header-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.office-back-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid #e5e7eb;
+  background: #f9fafb;
+  color: #374151;
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.office-back-btn:hover {
+  background: #e5e7eb;
+}
+
+.office-title-group h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  color: #111827;
+}
+
+.office-title-group p {
+  margin: 2px 0 0;
+  font-size: 13px;
+  color: #6b7280;
+}
+
+.office-container {
+  max-width: 1160px;
+  margin: 28px auto 0;
+  padding: 0 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.office-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(185px, 1fr));
+  gap: 16px;
+}
+
+.office-kpi-card {
+  background: #ffffff;
+  border-radius: 12px;
+  padding: 18px 20px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  border-left: 4px solid #ea580c;
+}
+
+.office-kpi-card.blue {
+  border-left-color: #2563eb;
+}
+
+.office-kpi-card.green {
+  border-left-color: #16a34a;
+}
+
+.office-kpi-card.purple {
+  border-left-color: #7c3aed;
+}
+
+.office-kpi-card.amber {
+  border-left-color: #d97706;
+}
+
+.office-kpi-label {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #6b7280;
+}
+
+.office-kpi-value {
+  font-size: 24px;
+  font-weight: 700;
+  color: #111827;
+  margin-top: 6px;
+}
+
+.office-kpi-sub {
+  font-size: 12px;
+  color: #6b7280;
+  margin-top: 4px;
+}
+
+.office-panel {
+  background: #ffffff;
+  border-radius: 12px;
+  padding: 22px 24px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+}
+
+.office-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.office-panel-header h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 700;
+  color: #1f2937;
+}
+
+.office-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 12px;
+}
+
+.office-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.office-field label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #374151;
+}
+
+.office-field input,
+.office-field select,
+.office-field textarea {
+  padding: 9px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  font-size: 14px;
+  color: #111827;
+  background: #ffffff;
+}
+
+.office-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 9px 16px;
+  border-radius: 8px;
+  border: none;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  background: #ea580c;
+  color: #ffffff;
+  transition: background 0.15s ease;
+}
+
+.office-btn:hover {
+  background: #c2410c;
+}
+
+.office-btn.secondary {
+  background: #f3f4f6;
+  color: #374151;
+  border: 1px solid #d1d5db;
+}
+
+.office-btn.secondary:hover {
+  background: #e5e7eb;
+}
+
+.office-btn.danger {
+  background: #fee2e2;
+  color: #dc2626;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.office-table-wrap {
+  overflow-x: auto;
+}
+
+.office-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.office-table th {
+  text-align: left;
+  padding: 10px 12px;
+  background: #f9fafb;
+  color: #4b5563;
+  font-weight: 600;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.office-table td {
+  padding: 12px;
+  border-bottom: 1px solid #f3f4f6;
+  color: #1f2937;
+  vertical-align: middle;
+}
+
+.office-badge {
+  display: inline-block;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.office-badge.novo {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.office-badge.em_atendimento {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.office-badge.qualificado {
+  background: #ede9fe;
+  color: #6d28d9;
+}
+
+.office-badge.convertido {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.office-badge.perdido {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.office-code {
+  background: #111827;
+  color: #f9fafb;
+  padding: 14px 16px;
+  border-radius: 8px;
+  font-family: monospace;
+  font-size: 12px;
+  overflow-x: auto;
+  white-space: pre;
+}

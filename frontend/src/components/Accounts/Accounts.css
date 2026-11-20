@@ -1,0 +1,22 @@
+.account-bar { background: #101c36; color: #f4f7ff; padding: 18px 28px; border-bottom: 3px solid #7c83ff; }
+.account-bar-inner { max-width: 1400px; margin: auto; display: flex; align-items: center; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
+.account-brand { display: grid; gap: 3px; }
+.account-brand strong { font-size: 18px; }
+.account-brand span { color: #b8c5df; font-size: 13px; }
+.account-controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.account-controls label { font-size: 13px; }
+.account-bar select, .account-bar input { background: white; color: #17223b; border: 1px solid #bcc7dc; border-radius: 8px; padding: 10px 12px; font: inherit; max-width: 100%; }
+.account-bar select { min-width: 220px; max-width: 340px; }
+.account-bar button { background: #6669e8; color: white; border: 1px solid #9397ff; border-radius: 8px; padding: 10px 14px; font: inherit; cursor: pointer; }
+.account-bar button:hover { background: #5457ca; }
+.account-bar button:disabled { opacity: .55; cursor: default; }
+.account-bar .account-logout { background: transparent; border-color: #64728e; }
+.account-bar :focus-visible { outline: 3px solid #b5c8ff; outline-offset: 3px; }
+.account-form { max-width: 740px; margin: 24px auto 6px; padding: 24px; background: #1a2b4b; border-radius: 12px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.account-form > div { width: 100%; }
+.account-form h2 { font-size: 20px; margin-bottom: 8px; }
+.account-form p { color: #c1cee5; font-size: 14px; }
+.account-form input { flex: 1; min-width: 180px; }
+.account-error { max-width: 1400px; margin: 16px auto 0; background: #5b2533; padding: 12px; border-radius: 8px; }
+.accounts-loading { padding: 60px 24px; text-align: center; }
+@media (max-width: 680px) { .account-bar { padding: 16px; } .account-controls { width: 100%; } .account-controls label { width: 100%; } .account-bar select { min-width: 0; width: 100%; max-width: none; } .account-form { padding: 16px; } }

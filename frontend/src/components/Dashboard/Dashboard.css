@@ -346,3 +346,31 @@
     display: none;
   }
 }
+
+.stats-error { padding: 20px; border: 1px solid #f5b9b9; border-radius: 12px; color: #9f2020; background: #fff4f4; }
+.stats-error button { margin-top: 12px; padding: 8px 14px; border: 1px solid #bc4242; border-radius: 6px; background: white; color: #9f2020; cursor: pointer; font: inherit; }
+
+
+.main-card.crm .card-icon {
+  background: #dbeafe;
+  color: #2563eb;
+}
+
+.main-card.ads .card-icon {
+  background: #dcfce7;
+  color: #16a34a;
+}
+
+.main-card.mcp .card-icon {
+  background: #f3e8ff;
+  color: #7c3aed;
+}
+
+.section-subtitle {
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #6b7280;
+  margin: 24px 0 12px 0;
+}

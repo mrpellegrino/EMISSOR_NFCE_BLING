@@ -152,7 +152,8 @@
   font-size: 0.9rem;
 }
 
-.form-group input {
+.form-group input,
+.integration-form .form-group select {
   padding: 0.875rem 1rem;
   border: 2px solid #e0e0e0;
   border-radius: 8px;
@@ -160,7 +161,8 @@
   transition: all 0.2s;
 }
 
-.form-group input:focus {
+.form-group input:focus,
+.integration-form .form-group select:focus {
   outline: none;
   border-color: #667eea;
   box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
@@ -168,6 +170,19 @@
 
 .form-group input::placeholder {
   color: #999;
+}
+
+.integration-form .form-group select {
+  width: 100%;
+  min-width: 0;
+  background-color: #fff;
+  color: #333;
+}
+
+.integration-form .form-group select:disabled {
+  background-color: #f3f4f6;
+  color: #666;
+  cursor: not-allowed;
 }
 
 .help-text {

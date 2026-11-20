@@ -1,23 +1,43 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  app.set('trust proxy', 2);
+  app.enableShutdownHooks();
 
   // Habilita validação global
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
-      forbidNonWhitelisted: true,
+      forbidNonWhitelisted: false,
       transform: true,
     }),
   );
 
-  // Habilita CORS para o frontend
+  // Habilita CORS para o frontend e para o formulário público do site Vila Pet
+  const allowedOrigins = [
+    'http://localhost:5173',
+    'http://localhost:5174',
+    'https://vilapetbrasil.com.br',
+    'https://www.vilapetbrasil.com.br',
+    'http://vilapetbrasil.com.br',
+    'http://www.vilapetbrasil.com.br',
+    ...(process.env.FRONTEND_URL
+      ? process.env.FRONTEND_URL.split(',').map((o) => o.trim()).filter(Boolean)
+      : []),
+    ...(process.env.SITE_ORIGINS
+      ? process.env.SITE_ORIGINS.split(',').map((o) => o.trim()).filter(Boolean)
+      : []),
+  ];
+
   app.enableCors({
-    origin: ['http://localhost:5173', 'http://localhost:5174'],
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
+    origin: allowedOrigins,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Account-Id', 'X-Webhook-Key'],
+    exposedHeaders: ['Retry-After'],
     credentials: true,
   });
 

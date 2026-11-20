@@ -1,5 +1,6 @@
+import { useBlingApi } from '../Accounts/BlingContext';
 import { useState, useEffect } from 'react';
-import { getFilaRPS } from '../../services/blingApi';
+
 import './Dashboard.css';
 
 interface DashboardProps {
@@ -12,6 +13,9 @@ interface DashboardProps {
   onGoToSettings: () => void;
   onGoToPedidosVenda: () => void;
   onGoToFilaRPS: () => void;
+  onGoToCrm: () => void;
+  onGoToAds: () => void;
+  onGoToMcp: () => void;
 }
 
 interface EstatisticasRPS {
@@ -22,7 +26,17 @@ interface EstatisticasRPS {
   total: number;
 }
 
-function Dashboard({ user, onLogout, onGoToSettings, onGoToPedidosVenda, onGoToFilaRPS }: DashboardProps) {
+function Dashboard({
+  user,
+  onLogout,
+  onGoToSettings,
+  onGoToPedidosVenda,
+  onGoToFilaRPS,
+  onGoToCrm,
+  onGoToAds,
+  onGoToMcp,
+}: DashboardProps) {
+  const { getEstatisticasRPS } = useBlingApi();
   const [estatisticas, setEstatisticas] = useState<EstatisticasRPS>({
     pendentes: 0,
     processando: 0,
@@ -31,29 +45,21 @@ function Dashboard({ user, onLogout, onGoToSettings, onGoToPedidosVenda, onGoToF
     total: 0
   });
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
-    const carregarEstatisticas = async () => {
-      try {
-        const response = await getFilaRPS({ pagina: 1, limite: 10000 });
-        const itens = response.data || [];
-        
-        setEstatisticas({
-          pendentes: itens.filter((i: any) => i.status === 'pendente').length,
-          processando: itens.filter((i: any) => i.status === 'processando').length,
-          emitidos: itens.filter((i: any) => i.status === 'emitido').length,
-          erros: itens.filter((i: any) => i.status === 'erro').length,
-          total: itens.length
-        });
-      } catch (error) {
-        console.error('Erro ao carregar estatísticas:', error);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    carregarEstatisticas();
-  }, []);
+    let cancelled = false;
+    getEstatisticasRPS().then(counts => {
+      if (cancelled) return;
+      setEstatisticas({ ...counts, total: counts.pendentes + counts.processando + counts.emitidos + counts.erros });
+      setError('');
+    }).catch(error => {
+      if (cancelled || (error instanceof DOMException && error.name === 'AbortError')) return;
+      setError('Não foi possível consultar o resumo desta conta. Verifique a conexão e tente novamente.');
+    }).finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [getEstatisticasRPS, attempt]);
 
   return (
     <div className="dashboard-container">
@@ -64,7 +70,7 @@ function Dashboard({ user, onLogout, onGoToSettings, onGoToPedidosVenda, onGoToF
             <path d="M2 17L12 22L22 17" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
             <path d="M2 12L12 17L22 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
-          <span>Emissor NFSe - Bling</span>
+          <span>Vila Pet Office — Gestão & Emissor NFSe</span>
         </div>
         <div className="header-user">
           <div className="user-info">
@@ -91,9 +97,10 @@ function Dashboard({ user, onLogout, onGoToSettings, onGoToPedidosVenda, onGoToF
       <main className="dashboard-main">
         <div className="welcome-section">
           <h1>Olá, {user.name.split(' ')[0]}! 👋</h1>
-          <p>Gerencie suas notas fiscais de serviço integradas com o Bling.</p>
+          <p>Camada de gestão Vila Pet integrada ao Bling ERP, CRM do Site, Tráfego Pago e Agente Hermes (MCP).</p>
         </div>
 
+        <div className="section-subtitle">Fiscal & ERP Bling (Emissão de Notas)</div>
         {/* Cards de Navegação Principal */}
         <div className="main-cards">
           <div className="main-card pedidos" onClick={onGoToPedidosVenda}>
@@ -107,7 +114,7 @@ function Dashboard({ user, onLogout, onGoToSettings, onGoToPedidosVenda, onGoToF
             </div>
             <div className="card-content">
               <h2>Pedidos de Venda</h2>
-              <p>Selecione pedidos do Bling para gerar RPS</p>
+              <p>Selecione pedidos do Bling para gerar RPS e gerencie metas</p>
             </div>
             <div className="card-arrow">
               <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -126,7 +133,65 @@ function Dashboard({ user, onLogout, onGoToSettings, onGoToPedidosVenda, onGoToF
             </div>
             <div className="card-content">
               <h2>Fila de Emissão de Notas Fiscais de Serviço</h2>
-              <p>Gerencie e emita notas fiscais de serviço</p>
+              <p>Gerencie e emita notas fiscais de serviço em lote</p>
+            </div>
+            <div className="card-arrow">
+              <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M9 18L15 12L9 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+            </div>
+          </div>
+        </div>
+
+        <div className="section-subtitle">Gestão Comercial, Tráfego Pago & IA (Hermes MCP)</div>
+        <div className="main-cards">
+          <div className="main-card crm" onClick={onGoToCrm}>
+            <div className="card-icon">
+              <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M17 21V19C17 17.9391 16.5786 16.9217 15.8284 16.1716C15.0783 15.4214 14.0609 15 13 15H5C3.93913 15 2.92172 15.4214 2.17157 16.1716C1.42143 16.9217 1 17.9391 1 19V21" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                <circle cx="9" cy="7" r="4" stroke="currentColor" strokeWidth="2"/>
+                <path d="M23 21V19C22.9993 18.1137 22.7044 17.2528 22.1614 16.5523C21.6184 15.8519 20.8581 15.3516 20 15.13" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+            </div>
+            <div className="card-content">
+              <h2>CRM de Leads (Site Vila Pet)</h2>
+              <p>Identifique leads do site, acompanhe o funil e vincule ao pedido no Bling</p>
+            </div>
+            <div className="card-arrow">
+              <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M9 18L15 12L9 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+            </div>
+          </div>
+
+          <div className="main-card ads" onClick={onGoToAds}>
+            <div className="card-icon">
+              <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M18 20V10M12 20V4M6 20V14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+            </div>
+            <div className="card-content">
+              <h2>Gestão de Tráfego Pago & ROAS</h2>
+              <p>Cruze investimentos de Google/Meta Ads com Leads do CRM e vendas no Bling</p>
+            </div>
+            <div className="card-arrow">
+              <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M9 18L15 12L9 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+            </div>
+          </div>
+
+          <div className="main-card mcp" onClick={onGoToMcp}>
+            <div className="card-icon">
+              <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <rect x="4" y="4" width="16" height="16" rx="2" stroke="currentColor" strokeWidth="2"/>
+                <rect x="9" y="9" width="6" height="6" stroke="currentColor" strokeWidth="2"/>
+                <path d="M9 1V4M15 1V4M9 20V23M15 20V23M20 9H23M20 14H23M1 9H4M1 14H4" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+              </svg>
+            </div>
+            <div className="card-content">
+              <h2>Hub MCP — Agente Hermes</h2>
+              <p>Servidor MCP intermediário entre o Bling ERP, o CRM, o Tráfego e o Hermes</p>
             </div>
             <div className="card-arrow">
               <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -141,6 +206,11 @@ function Dashboard({ user, onLogout, onGoToSettings, onGoToPedidosVenda, onGoToF
           <h3>Resumo da Fila RPS</h3>
           {loading ? (
             <div className="stats-loading">Carregando...</div>
+          ) : error ? (
+            <div className="stats-error" role="alert">
+              <p>{error}</p>
+              <button type="button" onClick={() => { setLoading(true); setError(''); setAttempt(value => value + 1); }}>Tentar novamente</button>
+            </div>
           ) : (
             <div className="stats-grid">
               <div className="stat-card pending" onClick={onGoToFilaRPS}>

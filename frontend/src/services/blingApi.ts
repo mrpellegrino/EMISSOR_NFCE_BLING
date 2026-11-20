@@ -1,6 +1,27 @@
-const API_URL = 'http://localhost:3000/api';
+export interface RpsTargetProgress {
+  stage: 'preparando' | 'buscando' | 'gerando' | 'aguardando' | 'pausada' | 'concluida' | 'erro' | 'sem_pedidos';
+  running: boolean;
+  updatedAt: string;
+  paginas: number;
+  candidatos: number;
+  examinados: number;
+  gerados: number;
+  ignorados: number;
+  erros: number;
+  pedidoAtual: number | null;
+  ultimoRps: { pedido: string; numeroRps: string | null; valor: number; at: string } | null;
+  eventos: { at: string; message: string; type: 'info' | 'success' | 'warning' | 'error' }[];
+}
 
-// Interface para Pedido de Venda
+export interface MetaRpsStatus {
+  target: number | null;
+  status: string | null;
+  message: string | null;
+  valorGerado: number;
+  progress: RpsTargetProgress | null;
+  falhas: { pedidoId: number; numeroPedido: string; mensagem: string; at: string }[];
+}
+
 export interface PedidoVenda {
   id: number;
   numero: number;
@@ -48,6 +69,7 @@ export interface BlingIntegrationStatus {
   clientId?: string;
   hasClientSecret?: boolean;
   initialOrderNumber?: number | null;
+  paymentMethodId?: string | null;
   tokenExpiresAt?: string;
   lastSyncAt?: string;
   createdAt?: string;
@@ -60,434 +82,95 @@ export interface SaveIntegrationResponse {
   isActive: boolean;
 }
 
+export interface FormaPagamento {
+  id: number;
+  descricao: string;
+}
+
+export interface RpsAutomationStatus {
+  enabled: boolean;
+  globalEnabled: boolean;
+  accountEnabled: boolean;
+  connected: boolean;
+  intervalSeconds: number;
+}
+
 export interface AuthorizationUrlResponse {
   authorizationUrl: string;
 }
 
-// Busca o status da integração Bling
-export const getBlingIntegration = async (): Promise<BlingIntegrationStatus> => {
-  const token = localStorage.getItem('access_token');
-
-  const response = await fetch(`${API_URL}/bling/integration`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error('Erro ao buscar integração');
-  }
-
-  return response.json();
-};
-
-// Salva a configuração de integração
-export const saveBlingIntegration = async (
-  clientId: string,
-  clientSecret: string,
-  initialOrderNumber?: number | null
-): Promise<SaveIntegrationResponse> => {
-  const token = localStorage.getItem('access_token');
-
-  const response = await fetch(`${API_URL}/bling/integration`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
-    },
-    body: JSON.stringify({ clientId, clientSecret, initialOrderNumber }),
-  });
-
-  if (!response.ok) {
-    if (response.status === 401) {
-      localStorage.removeItem('access_token');
-      localStorage.removeItem('user');
-      window.location.href = '/'; // Redireciona para login
-      throw new Error('Sessão expirada. Faça login novamente.');
-    }
-    const error = await response.json();
-    throw new Error(error.message || 'Erro ao salvar configuração');
-  }
-
-  return response.json();
-};
-
-// Atualiza apenas o número inicial de pedido
-export const setInitialOrderNumber = async (initialOrderNumber: number | null): Promise<{ message: string; initialOrderNumber: number | null }> => {
-  console.log('🔵 [API] setInitialOrderNumber chamado com:', initialOrderNumber);
-
-  const token = localStorage.getItem('access_token');
-  console.log('🔵 [API] Token do localStorage:', token ? `${token.substring(0, 20)}...` : 'null');
-
-  if (!token) {
-    console.error('🔴 [API] Token não encontrado no localStorage');
-    throw new Error('Você precisa estar logado para realizar esta ação.');
-  }
-
-  const url = `${API_URL}/bling/integration/initial-order`;
-  const body = { initialOrderNumber };
-
-  console.log('🔵 [API] URL:', url);
-  console.log('🔵 [API] Body:', JSON.stringify(body));
-  console.log('🔵 [API] Headers:', {
-    'Content-Type': 'application/json',
-    'Authorization': `Bearer ${token.substring(0, 20)}...`
-  });
-
-  try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`,
-      },
-      body: JSON.stringify(body),
-    });
-
-    console.log('🔵 [API] Response status:', response.status);
-    console.log('🔵 [API] Response statusText:', response.statusText);
-    console.log('🔵 [API] Response ok?', response.ok);
-
-    // Tenta ler o body da resposta
-    const responseText = await response.text();
-    console.log('🔵 [API] Response body (raw):', responseText);
-
-    if (!response.ok) {
-      let errorMessage = 'Erro ao salvar número inicial';
-
-      try {
-        const errorData = JSON.parse(responseText);
-        console.error('🔴 [API] Erro da API (parsed):', errorData);
-        errorMessage = errorData.message || errorMessage;
-      } catch (e) {
-        console.error('🔴 [API] Não foi possível parsear erro:', responseText);
-      }
-
-      if (response.status === 401) {
-        console.error('🔴 [API] 401 - Token inválido ou expirado');
-        errorMessage = 'Sessão expirada. Por favor, faça login novamente.';
-        // Não redireciona automaticamente, deixa o componente lidar com isso
-      }
-
-      throw new Error(errorMessage);
-    }
-
-    const result = JSON.parse(responseText);
-    console.log('🟢 [API] Resposta da API (parsed):', result);
-    return result;
-  } catch (error: any) {
-    console.error('🔴 [API] Erro na requisição:', error);
-    throw error;
-  }
-};
-
-// Obtém a URL de autorização OAuth
-export const getBlingAuthorizationUrl = async (): Promise<string> => {
-  const token = localStorage.getItem('access_token');
-
-  const response = await fetch(`${API_URL}/bling/authorize`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
-  });
-
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.message || 'Erro ao obter URL de autorização');
-  }
-
-  const data: AuthorizationUrlResponse = await response.json();
-  return data.authorizationUrl;
-};
-
-// Desativa a integração
-export const deactivateBlingIntegration = async (): Promise<void> => {
-  const token = localStorage.getItem('access_token');
-
-  const response = await fetch(`${API_URL}/bling/deactivate`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
-  });
-
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.message || 'Erro ao desativar integração');
-  }
-};
-
-// Remove a integração
-export const removeBlingIntegration = async (): Promise<void> => {
-  const token = localStorage.getItem('access_token');
-
-  const response = await fetch(`${API_URL}/bling/integration`, {
-    method: 'DELETE',
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
-  });
-
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.message || 'Erro ao remover integração');
-  }
-};
-
-// Busca dados da empresa no Bling
-export const getBlingEmpresa = async () => {
-  const token = localStorage.getItem('access_token');
-
-  const response = await fetch(`${API_URL}/bling/empresa`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error('Erro ao buscar dados da empresa');
-  }
-
-  return response.json();
-};
-
-// Lista produtos do Bling
-export const getBlingProdutos = async (page = 1, limit = 100) => {
-  const token = localStorage.getItem('access_token');
-
-  const response = await fetch(
-    `${API_URL}/bling/produtos?page=${page}&limit=${limit}`,
-    {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    }
-  );
-
-  if (!response.ok) {
-    throw new Error('Erro ao buscar produtos');
-  }
-
-  return response.json();
-};
-
-// Lista NFC-e do Bling
-export const getBlingNfces = async (page = 1, limit = 100) => {
-  const token = localStorage.getItem('access_token');
-
-  const response = await fetch(
-    `${API_URL}/bling/nfce?page=${page}&limit=${limit}`,
-    {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    }
-  );
-
-  if (!response.ok) {
-    throw new Error('Erro ao buscar NFC-e');
-  }
-
-  return response.json();
-};
-
-// Lista contatos do Bling
-export const getBlingContatos = async (page = 1, limit = 100) => {
-  const token = localStorage.getItem('access_token');
-
-  const response = await fetch(
-    `${API_URL}/bling/contatos?page=${page}&limit=${limit}`,
-    {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    }
-  );
-
-  if (!response.ok) {
-    throw new Error('Erro ao buscar contatos');
-  }
-
-  return response.json();
-};
-
-// Lista pedidos de venda do Bling
-export const getPedidosVenda = async (params: PedidosVendaParams = {}): Promise<PedidosVendaResponse> => {
-  const token = localStorage.getItem('access_token');
-
-  const queryParams = new URLSearchParams();
-  
-  if (params.pagina) queryParams.append('pagina', params.pagina.toString());
-  if (params.limite) queryParams.append('limite', params.limite.toString());
-  if (params.numero) queryParams.append('numero', params.numero.toString());
-  if (params.dataInicial) queryParams.append('dataInicial', params.dataInicial);
-  if (params.dataFinal) queryParams.append('dataFinal', params.dataFinal);
-  if (params.idContato) queryParams.append('idContato', params.idContato.toString());
-  if (params.idsSituacoes && params.idsSituacoes.length > 0) {
-    params.idsSituacoes.forEach(id => queryParams.append('idsSituacoes[]', id.toString()));
-  }
-
-  const url = `${API_URL}/bling/pedidos-venda${queryParams.toString() ? '?' + queryParams.toString() : ''}`;
-
-  const response = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
-  });
-
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ message: 'Erro ao buscar pedidos de venda' }));
-    throw new Error(error.message || 'Erro ao buscar pedidos de venda');
-  }
-
-  return response.json();
-};
-
-/**
- * =====================================================
- * FUNÇÕES PARA RPS
- * =====================================================
- */
-
-/**
- * Gerar RPS para pedidos de venda selecionados
- */
-export const gerarRPSPedidos = async (pedidoIds: number[]): Promise<any> => {
-  const token = localStorage.getItem('access_token');
-  const url = `${API_URL}/bling/gerar-rps`;
-  const body = { pedidoIds };
-
-  console.log('🔵 [gerarRPSPedidos] URL:', url);
-  console.log('🔵 [gerarRPSPedidos] Request Body:', JSON.stringify(body, null, 2));
-  console.log('🔵 [gerarRPSPedidos] Token:', token ? `${token.substring(0, 30)}...` : 'NULO');
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
-    },
-    body: JSON.stringify(body),
-  });
-
-  console.log('🔵 [gerarRPSPedidos] Response Status:', response.status);
-  console.log('🔵 [gerarRPSPedidos] Response OK:', response.ok);
-
-  const responseText = await response.text();
-  console.log('🔵 [gerarRPSPedidos] Response Body (raw):', responseText);
-
-  if (!response.ok) {
-    let errorData;
-    try {
-      errorData = JSON.parse(responseText);
-    } catch {
-      errorData = { message: 'Erro ao gerar RPS' };
-    }
-    console.error('🔴 [gerarRPSPedidos] Erro:', errorData);
-    throw new Error(errorData.message || 'Erro ao gerar RPS');
-  }
-
-  const result = JSON.parse(responseText);
-  console.log('🟢 [gerarRPSPedidos] Response Data:', JSON.stringify(result, null, 2));
-  return result;
-};
-
-/**
- * Interface para parâmetros da fila RPS
- */
 export interface FilaRpsParams {
   pagina?: number;
   limite?: number;
   status?: string;
 }
 
-/**
- * Buscar fila de RPS
- */
-export const getFilaRPS = async (params: FilaRpsParams = {}): Promise<any> => {
-  const token = localStorage.getItem('access_token');
+export interface RpsRecord {
+  id: number; pedidoVendaId: string; numeroPedido: string; numeroRPS: string | null;
+  nfseId: string | null; numeroNFSe: string | null; nomeCliente: string;
+  valorTotal: number | string; status: 'pendente' | 'processando' | 'emitido' | 'erro';
+  mensagemErro: string | null; createdAt: string;
+}
+export interface RpsBatchResult { resultados: { status: string; mensagem?: string }[] }
 
-  const queryParams = new URLSearchParams();
-  if (params.pagina) queryParams.append('pagina', params.pagina.toString());
-  if (params.limite) queryParams.append('limite', params.limite.toString());
-  if (params.status) queryParams.append('status', params.status);
-
-  const url = `${API_URL}/bling/fila-rps${queryParams.toString() ? '?' + queryParams.toString() : ''}`;
-
-  const response = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
-  });
-
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ message: 'Erro ao carregar fila RPS' }));
-    throw new Error(error.message || 'Erro ao carregar fila RPS');
+// A client belongs to one screen/account for its entire lifetime, including delayed callbacks.
+export const createBlingApi = (accountId: number) => {
+  let controller = new AbortController();
+  const sessionToken = localStorage.getItem('access_token');
+  const API_URL = `${(import.meta.env.VITE_API_URL || '/api').replace(/\/$/, '')}/bling`;
+  async function request<T>(path: string, init: RequestInit = {}, timeoutMs?: number): Promise<T> {
+    if (controller.signal.aborted) throw new DOMException('Conta alterada', 'AbortError');
+    const deadline = new AbortController();
+    const timeout = timeoutMs === undefined ? undefined : setTimeout(() => {
+      deadline.abort(new DOMException('A consulta demorou demais. Tente novamente.', 'TimeoutError'));
+    }, timeoutMs);
+    const signal = timeoutMs === undefined ? controller.signal : AbortSignal.any([controller.signal, deadline.signal]);
+    try {
+      const response = await fetch(API_URL + path, { ...init, headers: {
+        'Content-Type': 'application/json', 'X-Account-Id': String(accountId),
+        Authorization: 'Bearer ' + sessionToken,
+      }, signal });
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({}));
+        throw new Error(response.status === 401 ? 'Sessão expirada. Faça login novamente.' : error.message || 'Não foi possível concluir a operação.');
+      }
+      return await response.json();
+    } finally {
+      clearTimeout(timeout);
+    }
   }
-
-  return response.json();
-};
-
-/**
- * Obter estatísticas da fila RPS
- */
-export const getEstatisticasRPS = async (): Promise<any> => {
-  const token = localStorage.getItem('access_token');
-
-  const response = await fetch(`${API_URL}/bling/fila-rps/estatisticas`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
-  });
-
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ message: 'Erro ao buscar estatísticas' }));
-    throw new Error(error.message || 'Erro ao buscar estatísticas');
-  }
-
-  return response.json();
-};
-
-/**
- * Enviar NFSe selecionadas para a prefeitura
- */
-export const enviarNFSeParaPrefeitura = async (rpsIds: number[]): Promise<any> => {
-  const token = localStorage.getItem('access_token');
-
-  const response = await fetch(`${API_URL}/bling/enviar-nfse`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
-    },
-    body: JSON.stringify({ rpsIds }),
-  });
-
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ message: 'Erro ao enviar NFSe' }));
-    throw new Error(error.message || 'Erro ao enviar NFSe');
-  }
-
-  return response.json();
-};
-
-/**
- * Sincronizar status das NFSe com o Bling
- */
-export const sincronizarStatusNFSe = async (): Promise<any> => {
-  const token = localStorage.getItem('access_token');
-
-  const response = await fetch(`${API_URL}/bling/sincronizar-nfse`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
-  });
-
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ message: 'Erro ao sincronizar' }));
-    throw new Error(error.message || 'Erro ao sincronizar');
-  }
-
-  return response.json();
+  const post = <T>(path: string, body?: unknown) => request<T>(path, { method: 'POST', body: JSON.stringify(body) });
+  const query = (params: object) => {
+    const search = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value === undefined || value === null || value === '') continue;
+      if (Array.isArray(value)) value.forEach(item => search.append(key + '[]', String(item)));
+      else search.set(key, String(value));
+    }
+    return '?' + search.toString();
+  };
+  return {
+    getBlingIntegration: () => request<BlingIntegrationStatus>('/integration'),
+    getFormasPagamento: () => request<{ data: FormaPagamento[] }>('/formas-pagamentos', {}, 60000),
+    saveBlingIntegration: (clientId: string, clientSecret: string, initialOrderNumber?: number | null, paymentMethodId?: string | null) =>
+      post<SaveIntegrationResponse>('/integration', { clientId, clientSecret, initialOrderNumber, paymentMethodId }),
+    setInitialOrderNumber: (initialOrderNumber: number | null) => post<{ message: string; initialOrderNumber: number | null }>('/integration/initial-order', { initialOrderNumber }),
+    getBlingAuthorizationUrl: async () => (await request<AuthorizationUrlResponse>('/authorize')).authorizationUrl,
+    deactivateBlingIntegration: () => post('/deactivate'),
+    removeBlingIntegration: () => request('/integration', { method: 'DELETE' }),
+    getMetaRps: () => request<MetaRpsStatus>('/meta-rps', {}, 10000),
+    iniciarMetaRps: (valor: number) => post('/meta-rps', { valor }),
+    pausarMetaRps: () => post('/meta-rps/pausar'),
+    getPedidosVenda: (params: PedidosVendaParams = {}) => request<PedidosVendaResponse>('/pedidos-venda' + query(params)),
+    gerarRPSPedidos: (pedidoIds: number[]) => post<RpsBatchResult>('/gerar-rps', { pedidoIds }),
+    getFilaRPS: (params: FilaRpsParams = {}) => request<{ data: RpsRecord[]; total: number }>('/fila-rps' + query(params), {}, 15000),
+    getRpsAutomationStatus: () => request<RpsAutomationStatus>('/fila-rps/automacao', {}, 10000),
+    setRpsAutomation: (enabled: boolean) => post<{ accountEnabled: boolean }>(`/accounts/${accountId}/automacao`, { enabled }),
+    getEstatisticasRPS: () => request<{ pendentes: number; processando: number; emitidos: number; erros: number; valorEmitido: number }>('/fila-rps/estatisticas', {}, 15000),
+    enviarNFSeParaPrefeitura: (rpsIds: number[]) => post<RpsBatchResult>('/enviar-nfse', { rpsIds }),
+    resetarProcessamentoRps: (id: number) => post<{ status: string; message: string }>(`/fila-rps/${id}/resetar`),
+    sincronizarStatusNFSe: () => post<{ verificados: number; atualizados: number; removidos: number; falhas: number }>('/sincronizar-nfse'),
+    activate: () => { if (controller.signal.aborted) controller = new AbortController(); },
+    dispose: () => controller.abort(),
+  };
 };

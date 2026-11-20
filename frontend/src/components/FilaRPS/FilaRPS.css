@@ -452,3 +452,32 @@
     min-width: 600px;
   }
 }
+
+.rps-automation { display: flex; flex-direction: column; gap: 6px; padding: 16px 20px; margin-bottom: 20px; background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 10px; color: #312e81; }
+.rps-automation span, .rps-automation small { line-height: 1.5; }
+.rps-item-error { display: block; max-width: 320px; margin-top: 6px; color: #b91c1c; white-space: normal; overflow-wrap: anywhere; }
+.rps-automation-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0.75rem 0;
+}
+
+.rps-automation-controls button {
+  border: 0;
+  border-radius: 8px;
+  padding: 0.7rem 1rem;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.rps-queue-on { background: #166534; color: #fff; }
+.rps-queue-off { background: #92400e; color: #fff; }
+.rps-automation-controls button:disabled { opacity: 0.45; cursor: not-allowed; }
+.rps-automation-controls button:focus-visible { outline: 3px solid #6366f1; outline-offset: 3px; }
+
+.rps-reset-button { display: block; margin-top: 8px; padding: 5px 10px; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; color: #475569; font-size: 12px; cursor: pointer; }
+.rps-reset-button:hover { border-color: #7c3aed; color: #6d28d9; }
+.rps-reset-button:disabled { opacity: .6; cursor: wait; }

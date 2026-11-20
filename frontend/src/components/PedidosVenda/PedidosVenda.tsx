@@ -1,13 +1,17 @@
-import { useState, useEffect, useCallback } from 'react';
-import { getPedidosVenda, getBlingIntegration, gerarRPSPedidos } from '../../services/blingApi';
-import type { PedidoVenda } from '../../services/blingApi';
+import { useBlingApi } from '../Accounts/BlingContext';
+import { useState, useEffect, useCallback, useRef } from 'react';
+
+import type { PedidoVenda, MetaRpsStatus } from '../../services/blingApi';
 import './PedidosVenda.css';
+import { MetaRpsPanel } from './MetaRpsPanel';
+import { maskCurrency, parseCurrency } from '../../services/currency';
 
 interface PedidosVendaProps {
   onBack: () => void;
 }
 
 export const PedidosVenda = ({ onBack }: PedidosVendaProps) => {
+  const { getPedidosVenda, getBlingIntegration, gerarRPSPedidos, getMetaRps, iniciarMetaRps, pausarMetaRps } = useBlingApi();
   const [pedidos, setPedidos] = useState<PedidoVenda[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -21,6 +25,51 @@ export const PedidosVenda = ({ onBack }: PedidosVendaProps) => {
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [loadingRPS, setLoadingRPS] = useState(false);
   const [rpsMessage, setRpsMessage] = useState('');
+  const [erroTotal, setErroTotal] = useState(false);
+  const [meta, setMeta] = useState<MetaRpsStatus | null>(null);
+  const [valorAlvo, setValorAlvo] = useState('');
+  const [metaError, setMetaError] = useState('');
+  const [salvandoMeta, setSalvandoMeta] = useState(false);
+  const consultaMeta = useRef(false);
+  const alvoInicializado = useRef(false);
+  const [atualizadoEm, setAtualizadoEm] = useState<number | null>(null);
+  const carregarMeta = useCallback(async () => {
+    if (consultaMeta.current) return;
+    consultaMeta.current = true;
+    try {
+      const result = await getMetaRps();
+      setMeta(result);
+      setAtualizadoEm(Date.now());
+      if (!alvoInicializado.current) {
+        alvoInicializado.current = true;
+        if (result.target != null) setValorAlvo(maskCurrency(String(Math.round(result.target * 100))));
+      }
+      setErroTotal(false);
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      setErroTotal(true);
+    } finally { consultaMeta.current = false; }
+  }, [getMetaRps]);
+  useEffect(() => {
+    void carregarMeta();
+    const timer = setInterval(() => void carregarMeta(), 500);
+    return () => clearInterval(timer);
+  }, [carregarMeta]);
+  const alterarMeta = async (pausar: boolean) => {
+    setSalvandoMeta(true);
+    setMetaError('');
+    try {
+      if (pausar) await pausarMetaRps();
+      else {
+        const valor = parseCurrency(valorAlvo);
+        if (!Number.isFinite(valor) || valor <= 0) throw new Error('Informe um valor-alvo maior que zero.');
+        await iniciarMetaRps(valor);
+      }
+      await carregarMeta();
+    } catch (err) {
+      if (!(err instanceof DOMException && err.name === 'AbortError')) setMetaError(err instanceof Error ? err.message : 'Não foi possível atualizar a meta.');
+    } finally { setSalvandoMeta(false); }
+  };
 
   // Buscar configuração do número inicial
   useEffect(() => {
@@ -29,6 +78,7 @@ export const PedidosVenda = ({ onBack }: PedidosVendaProps) => {
         const config = await getBlingIntegration();
         setNumeroInicial(config.initialOrderNumber ?? null);
       } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
         console.error('Erro ao carregar configuração:', err);
       } finally {
         setLoadingConfig(false);
@@ -39,13 +89,13 @@ export const PedidosVenda = ({ onBack }: PedidosVendaProps) => {
 
   const carregarPedidos = useCallback(async () => {
     if (loadingConfig) return;
-    
+
     try {
       setLoading(true);
       setError('');
-      
+
       const params: any = { pagina, limite: 100 }; // Buscar mais para filtrar localmente
-      
+
       if (filtroNumero) {
         params.numero = parseInt(filtroNumero);
       }
@@ -58,30 +108,30 @@ export const PedidosVenda = ({ onBack }: PedidosVendaProps) => {
 
       const response = await getPedidosVenda(params);
       let pedidosFiltrados = response.data || [];
-      
+
       // Debug: ver situações dos pedidos
-      console.log('🔵 Pedidos recebidos (ANTES do filtro):', pedidosFiltrados.map(p => ({ 
-        numero: p.numero, 
+      console.log('🔵 Pedidos recebidos (ANTES do filtro):', pedidosFiltrados.map(p => ({
+        numero: p.numero,
         situacao: p.situacao,
         situacaoId: p.situacao?.id,
         situacaoIdType: typeof p.situacao?.id
       })));
-      
+
       // Filtrar pedidos pelo número inicial configurado
       if (numeroInicial !== null && numeroInicial > 0) {
         pedidosFiltrados = pedidosFiltrados.filter(p => p.numero >= numeroInicial);
       }
-      
+
       // Filtrar pedidos cancelados (situação 2) - comparar como string e número
       pedidosFiltrados = pedidosFiltrados.filter(p => {
         const situacaoId = p.situacao?.id;
         return situacaoId !== 2 && String(situacaoId) !== '2';
       });
-      
+
       console.log('🟢 Pedidos APÓS filtro:', pedidosFiltrados.length);
-      
+
       setPedidos(pedidosFiltrados);
-      
+
       // Estimar total de páginas baseado nos resultados
       if (response.data && response.data.length === 100) {
         setTotalPaginas(Math.max(totalPaginas, pagina + 1));
@@ -89,6 +139,7 @@ export const PedidosVenda = ({ onBack }: PedidosVendaProps) => {
         setTotalPaginas(pagina);
       }
     } catch (err: any) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
       console.error('Erro ao carregar pedidos:', err);
       setError(err.message || 'Erro ao carregar pedidos de venda');
     } finally {
@@ -131,14 +182,14 @@ export const PedidosVenda = ({ onBack }: PedidosVendaProps) => {
 
   const getSituacaoClass = (situacao?: { id: number; valor: string }) => {
     if (!situacao) return 'situacao-padrao';
-    
+
     const id = situacao.id;
     // Situações comuns do Bling
     if (id === 6 || id === 9) return 'situacao-atendido'; // Atendido/Finalizado
     if (id === 15) return 'situacao-em-andamento'; // Em andamento
     if (id === 12) return 'situacao-cancelado'; // Cancelado
     if (id === 24) return 'situacao-verificado'; // Verificado
-    
+
     return 'situacao-padrao';
   };
 
@@ -146,16 +197,16 @@ export const PedidosVenda = ({ onBack }: PedidosVendaProps) => {
   const isSelectable = (pedido: PedidoVenda) => {
     // Não pode selecionar se já tem RPS emitido
     if (pedido.rpsStatus) return false;
-    
+
     // Não pode selecionar se for situação 2 (cancelado)
     if (pedido.situacao?.id === 2 || String(pedido.situacao?.id) === '2') return false;
-    
+
     // Não pode selecionar se for Consumidor Final
     const nomeCliente = pedido.contato?.nome?.toLowerCase() || '';
     if (nomeCliente.includes('consumidor final') || nomeCliente === 'consumidor final') {
       return false;
     }
-    
+
     return true;
   };
 
@@ -217,11 +268,12 @@ export const PedidosVenda = ({ onBack }: PedidosVendaProps) => {
       setSelectedIds(new Set()); // Limpar seleção
 
       // Recarregar pedidos para mostrar status RPS atualizado
-      await carregarPedidos();
+      await Promise.all([carregarPedidos(), carregarMeta()]);
 
       // Limpar mensagem após 5 segundos
       setTimeout(() => setRpsMessage(''), 5000);
     } catch (err: any) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
       setError(err.message || 'Erro ao gerar RPS');
     } finally {
       setLoadingRPS(false);
@@ -292,6 +344,10 @@ export const PedidosVenda = ({ onBack }: PedidosVendaProps) => {
           </div>
         </form>
 
+        <MetaRpsPanel meta={meta} valorAlvo={valorAlvo} onValorAlvo={setValorAlvo}
+          onIniciar={() => void alterarMeta(false)} onPausar={() => void alterarMeta(true)}
+          salvando={salvandoMeta} erro={metaError} desconectado={erroTotal} atualizadoEm={atualizadoEm} />
+
         {/* Mensagens de erro */}
         {error && <div className="alert alert-error">{error}</div>}
 
@@ -355,7 +411,7 @@ export const PedidosVenda = ({ onBack }: PedidosVendaProps) => {
                 {pedidos.map((pedido) => {
                   const selectable = isSelectable(pedido);
                   const tooltip = getCheckboxTooltip(pedido);
-                  
+
                   return (
                     <tr key={pedido.id} className={`${selectedIds.has(pedido.id) ? 'selected' : ''} ${!selectable ? 'disabled-row' : ''}`}>
                       <td className="checkbox-cell">

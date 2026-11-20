@@ -1,12 +1,12 @@
+import { RpsTargetProgress, novoProgressoMeta } from './rps-target-progress';
 import { Injectable, Logger, BadRequestException, Inject, forwardRef } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, MoreThan } from 'typeorm';
+import { AccountContext } from './account-context';
 import { BlingIntegration } from './entities/bling-integration.entity';
 import { RpsService } from './rps.service';
 import * as crypto from 'crypto';
-import * as fs from 'fs';
-import * as path from 'path';
 
 interface BlingTokens {
   access_token: string;
@@ -15,6 +15,10 @@ interface BlingTokens {
   scope: string;
   refresh_token: string;
   expires_at?: number; // Timestamp de expiração calculado
+}
+
+export class BlingApiException extends BadRequestException {
+  constructor(readonly upstreamStatus: number, message: string, readonly upstreamType?: string) { super(message); }
 }
 
 export interface NFSeResultado {
@@ -34,7 +38,7 @@ interface BlingConfig {
   client_secret: string;
   redirect_uri: string;
   base_url: string;
-  tokens_file: string;
+
   authorization_url: string;
   token_url: string;
   initial_order_number?: number | null;
@@ -44,8 +48,41 @@ interface BlingConfig {
 export class BlingService {
   private readonly logger = new Logger(BlingService.name);
   private static readonly BLING_REQUEST_INTERVAL_MS = 500; // Limite da API: 3 req/s (com margem)
-  private readonly config: BlingConfig;
-  private tokens: BlingTokens | null = null;
+  private get config(): BlingConfig {
+    const account = this.accountContext.account;
+    return {
+      client_id: account.clientId || '', client_secret: account.clientSecret || '',
+      redirect_uri: this.configService.get('BLING_REDIRECT_URI', 'http://localhost:3000/api/bling/callback'),
+      base_url: this.configService.get('BLING_API_BASE_URL', 'https://api.bling.com.br'),
+      authorization_url: this.configService.get('BLING_AUTHORIZATION_URL', 'https://www.bling.com.br/Api/v3/oauth/authorize'),
+      token_url: this.configService.get('BLING_TOKEN_URL', 'https://www.bling.com.br/Api/v3/oauth/token'),
+      initial_order_number: account.initialOrderNumber,
+    };
+  }
+  private get tokens(): BlingTokens | null {
+    const account = this.accountContext.account;
+    if (!account.accessToken) return null;
+    return { access_token: account.accessToken, refresh_token: account.refreshToken || '',
+      expires_at: Number(account.expiresAt), expires_in: 0, token_type: 'Bearer', scope: '' };
+  }
+  private set tokens(tokens: BlingTokens | null) {
+    Object.assign(this.accountContext.account, {
+      accessToken: tokens?.access_token ?? null, refreshToken: tokens?.refresh_token ?? null,
+      expiresAt: tokens?.expires_at ?? null, isActive: !!tokens,
+    });
+  }
+  private persistAccount() {
+    // Automation can be paused concurrently; never overwrite that flag from a stale token snapshot.
+    const { autoRpsEnabled, rpsTarget, rpsTargetStatus, rpsTargetMessage, rpsTargetFailures, ...account } = this.accountContext.account;
+    return this.blingIntegrationRepository.save(account);
+  }
+
+  private async envioAutomaticoHabilitado(): Promise<boolean> {
+    const account = await this.blingIntegrationRepository.findOne({
+      where: { id: this.accountContext.account.id }, select: { id: true, autoRpsEnabled: true },
+    });
+    return !!account && account.autoRpsEnabled !== false;
+  }
   private lastBlingRequestAt = 0;
   private blingRateLimitChain: Promise<void> = Promise.resolve();
 
@@ -59,33 +96,27 @@ export class BlingService {
   };
 
   // Código de serviço padrão (pode ser alterado via configuração)
-  private codigoServicoAtual = '050801';
+  private get codigoServicoAtual() { return this.accountContext.account.serviceCode; }
 
   // Parcela atual (pode ser alterada via configuração)
-  private parcelaAtual = Math.min(Math.max(new Date().getMonth() + 1, 1), 12);
+  private get parcelaAtual() { return this.accountContext.account.installment ?? new Date().getMonth() + 1; }
 
   constructor(
     private configService: ConfigService,
     @InjectRepository(BlingIntegration)
     private readonly blingIntegrationRepository: Repository<BlingIntegration>,
-    @Inject(forwardRef(() => RpsService))
-    private readonly rpsService: RpsService,
-  ) {
-    this.config = {
-      client_id: this.configService.get<string>('BLING_CLIENT_ID', 'e4d47370e5826618068d4d55eff5053cbba92402'),
-      client_secret: this.configService.get<string>('BLING_CLIENT_SECRET', '9d1cc19d2b2f61509a6f1b30560dc73dd35cff'),
-      redirect_uri: this.configService.get<string>('BLING_REDIRECT_URI', 'http://localhost:3000/bling/callback'),
-      base_url: this.configService.get<string>('BLING_API_BASE_URL', 'https://api.bling.com.br'),
-      tokens_file: this.configService.get<string>('TOKENS_FILE', './tokens.json'),
-      authorization_url: this.configService.get<string>('BLING_AUTHORIZATION_URL', 'https://www.bling.com.br/Api/v3/oauth/authorize'),
-      token_url: this.configService.get<string>('BLING_TOKEN_URL', 'https://www.bling.com.br/Api/v3/oauth/token')
-    };
+    @Inject(forwardRef(() => RpsService)) private readonly rpsService: RpsService,
+    private readonly accountContext: AccountContext,
+  ) {}
 
-    // Tentar carregar credenciais salvas (sobrescreve env vars se existir)
-    this.loadCredentials();
-
-    // Carregar tokens existentes na inicialização
-    this.loadTokens();
+  private dataEmissaoHoje(): string {
+    // UTC já está no dia seguinte após as 21h em Brasília (rejeição E0008).
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Sao_Paulo',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+    }).formatToParts(new Date());
+    const value = (type: string) => parts.find(part => part.type === type)!.value;
+    return `${value('year')}-${value('month')}-${value('day')}`;
   }
 
   private async sleep(ms: number): Promise<void> {
@@ -108,173 +139,82 @@ export class BlingService {
     await this.blingRateLimitChain;
   }
 
-  private getCredentialsPath(): string {
-    return path.resolve(path.dirname(this.config.tokens_file), 'bling-config.json');
-  }
-
-  /**
-   * Salva credenciais (Client ID e Secret)
-   */
-  saveCredentials(clientId: string, clientSecret: string): void {
-    try {
-      this.config.client_id = clientId;
-      this.config.client_secret = clientSecret;
-
-      const configPath = this.getCredentialsPath();
-      const configDir = path.dirname(configPath);
-
-      if (!fs.existsSync(configDir)) {
-        fs.mkdirSync(configDir, { recursive: true });
-      }
-
-      const existingCfg = fs.existsSync(configPath)
-        ? JSON.parse(fs.readFileSync(configPath, 'utf8'))
-        : {};
-
-      const newCfg = {
-        client_id: clientId,
-        client_secret: clientSecret,
-        initial_order_number: existingCfg.initial_order_number ?? null
-      };
-
-      fs.writeFileSync(configPath, JSON.stringify(newCfg, null, 2));
-
-      this.logger.log(`Credenciais salvas em: ${configPath}`);
-    } catch (error) {
-      this.logger.error(`Erro ao salvar credenciais: ${error.message}`);
-      throw new Error('Falha ao salvar credenciais');
-    }
-  }
-
-  /**
-   * Carrega credenciais do arquivo
-   */
-  private loadCredentials(): void {
-    try {
-      const configPath = this.getCredentialsPath();
-      if (fs.existsSync(configPath)) {
-        const configData = fs.readFileSync(configPath, 'utf8');
-        const savedConfig = JSON.parse(configData);
-
-        if (savedConfig.client_id && savedConfig.client_secret) {
-          this.config.client_id = savedConfig.client_id;
-          this.config.client_secret = savedConfig.client_secret;
-          this.config.initial_order_number = typeof savedConfig.initial_order_number === 'number'
-            ? savedConfig.initial_order_number
-            : null;
-          this.logger.log('Credenciais carregadas do arquivo de configuração');
-        }
-      }
-    } catch (error) {
-      this.logger.error(`Erro ao carregar credenciais: ${error.message}`);
-    }
-  }
-
-  /**
-   * Remove credenciais salvas
-   */
-  removeCredentials(): void {
-    try {
-      const configPath = this.getCredentialsPath();
-      if (fs.existsSync(configPath)) {
-        fs.unlinkSync(configPath);
-        this.logger.log('Arquivo de credenciais removido');
-      }
-
-      // Reverter para env vars (ou valores padrão)
-      this.config.client_id = this.configService.get<string>('BLING_CLIENT_ID', 'e4d47370e5826618068d4d55eff5053cbba92402');
-      this.config.client_secret = this.configService.get<string>('BLING_CLIENT_SECRET', '9d1cc19d2b2f61509a6f1b30560dc73dd35cff');
-      this.config.initial_order_number = null;
-
-    } catch (error) {
-      this.logger.error(`Erro ao remover credenciais: ${error.message}`);
-    }
-  }
-
-  /**
-   * Obtém status da integração
-   */
-  getIntegrationStatus(): any {
-    const hasTokens = !!this.tokens;
-    const now = Date.now();
-    const expiresAt = this.tokens?.expires_at || 0;
-
+  getIntegrationStatus() {
+    const account = this.accountContext.account;
     return {
-      configured: !!(this.config.client_id && this.config.client_secret),
-      isActive: hasTokens && now < expiresAt,
-      clientId: this.config.client_id,
-      hasClientSecret: !!this.config.client_secret,
-      initialOrderNumber: this.config.initial_order_number ?? null,
-      tokenExpiresAt: this.tokens?.expires_at ? new Date(this.tokens.expires_at).toISOString() : null,
-      lastSyncAt: null // Implementar se houver sincronização
+      accountId: account.id, name: account.name,
+      configured: !!(account.clientId && account.clientSecret),
+      isActive: !!(account.accessToken && account.refreshToken),
+      clientId: account.clientId, hasClientSecret: !!account.clientSecret,
+      initialOrderNumber: account.initialOrderNumber ?? null,
+      paymentMethodId: account.paymentMethodId ?? null,
+      autoRpsEnabled: account.autoRpsEnabled !== false,
+      rpsTargetStatus: account.rpsTargetStatus,
+      tokenExpiresAt: account.expiresAt ? new Date(Number(account.expiresAt)).toISOString() : null,
     };
   }
 
-  /**
-   * Define o número inicial do pedido de venda a sincronizar
-   */
-  setInitialOrderNumber(orderNumber: number | null): void {
-    // Mantém suporte legacy baseado em arquivo para cenários não autenticados
-    try {
-      this.config.initial_order_number = orderNumber ?? null;
-      const configPath = this.getCredentialsPath();
-      const existingCfg = fs.existsSync(configPath)
-        ? JSON.parse(fs.readFileSync(configPath, 'utf8'))
-        : {};
-      existingCfg.initial_order_number = this.config.initial_order_number;
-      existingCfg.client_id = existingCfg.client_id ?? this.config.client_id;
-      existingCfg.client_secret = existingCfg.client_secret ?? this.config.client_secret;
-      const configDir = path.dirname(configPath);
-      if (!fs.existsSync(configDir)) fs.mkdirSync(configDir, { recursive: true });
-      fs.writeFileSync(configPath, JSON.stringify(existingCfg, null, 2));
-      this.logger.log(`Número inicial de pedido salvo (global): ${this.config.initial_order_number ?? 'null'}`);
-    } catch (error) {
-      this.logger.error(`Erro ao salvar número inicial global: ${error.message}`);
+  async saveCredentials(clientId: string, clientSecret?: string, initialOrderNumber?: number | null, paymentMethodId?: string | null) {
+    const account = this.accountContext.account;
+    if (typeof clientId !== 'string' || !clientId.trim()) throw new BadRequestException('Client ID é obrigatório.');
+    if (clientSecret !== undefined && typeof clientSecret !== 'string') throw new BadRequestException('Client Secret inválido.');
+    const secret = clientSecret?.trim() || account.clientSecret;
+    if (!secret) throw new BadRequestException('Client Secret é obrigatório.');
+    if (initialOrderNumber !== undefined && initialOrderNumber !== null && (!Number.isSafeInteger(initialOrderNumber) || initialOrderNumber < 0)) {
+      throw new BadRequestException('Número inicial deve ser um inteiro positivo ou vazio.');
     }
-  }
-
-  async setInitialOrderNumberForUser(userId: string, orderNumber: number | null): Promise<void> {
-    let integration = await this.blingIntegrationRepository.findOne({ where: { userId } });
-    if (!integration) {
-      // cria registro se não existir (sem tokens, apenas setting)
-      integration = new BlingIntegration();
-      integration.userId = userId;
-      integration.accessToken = null;
-      integration.refreshToken = null;
-      integration.expiresAt = null;
-      integration.isActive = false;
-      integration.initialOrderNumber = orderNumber ?? null;
-    } else {
-      integration.initialOrderNumber = orderNumber ?? null;
+    if (paymentMethodId !== undefined && paymentMethodId !== null && !/^[1-9][0-9]*$/.test(String(paymentMethodId))) {
+      throw new BadRequestException('ID da forma de pagamento inválido.');
     }
-    await this.blingIntegrationRepository.save(integration);
-    this.logger.log(`Número inicial de pedido salvo para userId=${userId}: ${integration.initialOrderNumber ?? 'null'}`);
+    if (account.clientId !== clientId.trim() || account.clientSecret !== secret) {
+      this.tokens = null;
+      account.oauthStateHash = null;
+      account.oauthStateExpiresAt = null;
+    }
+    account.clientId = clientId.trim(); account.clientSecret = secret;
+    if (initialOrderNumber !== undefined) account.initialOrderNumber = initialOrderNumber;
+    if (paymentMethodId !== undefined) account.paymentMethodId = paymentMethodId;
+    await this.persistAccount();
   }
 
-  async getInitialOrderNumberForUser(userId: string): Promise<number | null> {
-    const integration = await this.blingIntegrationRepository.findOne({ where: { userId } });
-    return integration?.initialOrderNumber ?? null;
+  async removeCredentials() {
+    Object.assign(this.accountContext.account, { clientId: null, clientSecret: null });
+    await this.clearTokens();
   }
 
-  /**
-   * Gera URL de autorização OAuth2 para o usuário
-   */
-  generateAuthorizationUrl(): string {
-    const state = crypto.randomBytes(16).toString('hex');
+  async setInitialOrderNumber(orderNumber: number | null) {
+    this.accountContext.account.initialOrderNumber = orderNumber;
+    await this.persistAccount();
+  }
 
-    // Salvar state para verificação posterior (em produção, usar Redis ou banco)
-    this.saveState(state);
+  async generateAuthorizationUrl(): Promise<string> {
+    if (!this.config.client_id || !this.config.client_secret) throw new BadRequestException('Configure as credenciais desta conta primeiro.');
+    const state = crypto.randomBytes(32).toString('hex');
+    this.accountContext.account.oauthStateHash = this.hashState(state);
+    this.accountContext.account.oauthStateExpiresAt = Date.now() + 10 * 60 * 1000;
+    await this.persistAccount();
+    const params = new URLSearchParams({ response_type: 'code', client_id: this.config.client_id, state });
+    return this.config.authorization_url + '?' + params.toString();
+  }
 
-    const params = new URLSearchParams({
-      response_type: 'code',
-      client_id: this.config.client_id,
-      state: state
-    });
+  private hashState(state: string) { return crypto.createHash('sha256').update(state).digest('hex'); }
 
-    const authUrl = `${this.config.authorization_url}?${params.toString()}`;
+  async findOAuthAccount(state: string) {
+    if (typeof state !== 'string' || !state) throw new BadRequestException('State inválido ou expirado.');
+    const account = await this.blingIntegrationRepository.findOne({ where: {
+      oauthStateHash: this.hashState(state), oauthStateExpiresAt: MoreThan(Date.now()),
+    } });
+    if (!account) throw new BadRequestException('State inválido ou expirado.');
+    return account;
+  }
 
-    this.logger.log(`URL de autorização gerada: ${authUrl}`);
-    return authUrl;
+  private async verifyState(state: string): Promise<boolean> {
+    const result = await this.blingIntegrationRepository.update({
+      id: this.accountContext.account.id, oauthStateHash: this.hashState(state), oauthStateExpiresAt: MoreThan(Date.now()),
+    }, { oauthStateHash: null, oauthStateExpiresAt: null });
+    this.accountContext.account.oauthStateHash = null;
+    this.accountContext.account.oauthStateExpiresAt = null;
+    return result.affected === 1;
   }
 
   /**
@@ -283,7 +223,7 @@ export class BlingService {
   async exchangeCodeForTokens(code: string, state: string): Promise<BlingTokens> {
     try {
       // Verificar state para segurança
-      if (!this.verifyState(state)) {
+      if (!await this.verifyState(state)) {
         throw new BadRequestException('State inválido - possível ataque CSRF');
       }
 
@@ -299,6 +239,7 @@ export class BlingService {
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
           'Accept': '1.0',
+          'enable-jwt': '1',
           'Authorization': `Basic ${credentials}`
         },
         body: new URLSearchParams({
@@ -325,7 +266,7 @@ export class BlingService {
       this.logger.log('Tokens de acesso obtidos com sucesso');
 
       // Salvar tokens em arquivo
-      this.saveTokens(tokens);
+      await this.persistAccount();
 
       return tokens;
     } catch (error) {
@@ -359,6 +300,7 @@ export class BlingService {
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
           'Accept': '1.0',
+          'enable-jwt': '1',
           'Authorization': `Basic ${credentials}`
         },
         body: new URLSearchParams({
@@ -385,7 +327,7 @@ export class BlingService {
       this.logger.log('Token de acesso renovado com sucesso');
 
       // Salvar tokens atualizados em arquivo
-      this.saveTokens(newTokens);
+      await this.persistAccount();
 
       return newTokens;
     } catch (error) {
@@ -415,17 +357,17 @@ export class BlingService {
       await this.refreshAccessToken();
     }
 
-    return this.tokens.access_token;
+    return this.tokens!.access_token;
   }
 
   /**
    * Faz requisição autenticada para API do Bling
    */
-  async makeAuthenticatedRequest(endpoint: string, options: RequestInit = {}): Promise<any> {
+  async makeAuthenticatedRequest(endpoint: string, options: RequestInit = {}, logResponseBody = true): Promise<any> {
     const accessToken = await this.ensureValidToken();
 
     const url = `${this.config.base_url}${endpoint}`;
-    
+
     // Log detalhado da requisição
     console.log('=== REQUISIÇÃO BLING ===');
     console.log('URL:', url);
@@ -439,7 +381,9 @@ export class BlingService {
 
     const response = await fetch(url, {
       ...options,
+      signal: options.signal ?? AbortSignal.timeout(60000),
       headers: {
+        'enable-jwt': '1',
         'Authorization': `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
         ...options.headers
@@ -449,12 +393,27 @@ export class BlingService {
     const responseText = await response.text();
     console.log('=== RESPOSTA BLING ===');
     console.log('Status:', response.status);
-    console.log('Response:', responseText);
+    if (logResponseBody) console.log('Response:', responseText);
     console.log('======================');
 
     if (!response.ok) {
-      this.logger.error(`Erro na requisição Bling: ${response.status} - ${responseText}`);
-      throw new BadRequestException(`Erro na API Bling: ${response.status} - ${responseText}`);
+      this.logger.error(`Erro na requisição Bling: ${response.status}${logResponseBody ? ` - ${responseText}` : ''}`);
+      let upstreamType: string | undefined;
+      let mensagem = `Erro na API Bling: ${response.status} - ${responseText}`;
+      try {
+        const erro = JSON.parse(responseText)?.error;
+        upstreamType = erro?.type;
+        const detalhes = [erro?.message, erro?.description,
+          ...(Array.isArray(erro?.fields) ? erro.fields.map(field => field?.message) : []),
+        ].filter(value => typeof value === 'string').join(' ');
+        if ([400, 422].includes(response.status) && /^\/Api\/v3\/nfse(?:\/|$)/.test(endpoint) && /\bE0008\b/.test(detalhes)) {
+          mensagem = 'Rejeição E0008: a data/hora de emissão da DPS está posterior ao horário de processamento. '
+            + 'Abra esta nota no Bling e confira a data de emissão. Se o dia estiver correto, confira também o horário e o fuso do emissor; '
+            + 'se persistir, solicite ao suporte do Bling a conferência da data/hora enviada na DPS. '
+            + 'Após corrigir, tente enviar novamente a mesma nota. A correção de fuso no sistema não altera notas já criadas.';
+        }
+      } catch { /* Preserve the original response for non-JSON failures. */ }
+      throw new BlingApiException(response.status, mensagem, upstreamType);
     }
 
     try {
@@ -517,100 +476,17 @@ export class BlingService {
   /**
    * Define tokens manualmente (para testes ou importação)
    */
-  setTokens(tokens: BlingTokens): void {
-    if (!tokens.expires_at) {
-      tokens.expires_at = Date.now() + (tokens.expires_in * 1000);
-    }
+  async setTokens(tokens: BlingTokens): Promise<void> {
+    if (!tokens.expires_at) tokens.expires_at = Date.now() + tokens.expires_in * 1000;
     this.tokens = tokens;
-    this.logger.log('Tokens definidos manualmente');
+    await this.persistAccount();
   }
 
-  /**
-   * Remove tokens (logout)
-   */
-  clearTokens(): void {
+  async clearTokens(): Promise<void> {
     this.tokens = null;
-    this.logger.log('Tokens removidos');
-
-    // Remover arquivo de tokens
-    this.deleteTokensFile();
-  }
-
-  /**
-   * Carrega tokens do arquivo de configuração
-   */
-  private loadTokens(): void {
-    try {
-      const tokensPath = path.resolve(this.config.tokens_file);
-      if (fs.existsSync(tokensPath)) {
-        const tokensData = fs.readFileSync(tokensPath, 'utf8');
-        const tokens: BlingTokens = JSON.parse(tokensData);
-
-        // Verificar se os tokens não expiraram
-        const now = Date.now();
-        if (tokens.expires_at && now < tokens.expires_at) {
-          this.tokens = tokens;
-          this.logger.log('Tokens carregados do arquivo');
-        } else {
-          this.logger.log('Tokens expirados encontrados no arquivo');
-          this.deleteTokensFile();
-        }
-      }
-    } catch (error) {
-      this.logger.error(`Erro ao carregar tokens: ${error.message}`);
-    }
-  }
-
-  /**
-   * Salva tokens no arquivo de configuração
-   */
-  private saveTokens(tokens: BlingTokens): void {
-    try {
-      const tokensPath = path.resolve(this.config.tokens_file);
-      const tokensDir = path.dirname(tokensPath);
-
-      // Criar diretório se não existir
-      if (!fs.existsSync(tokensDir)) {
-        fs.mkdirSync(tokensDir, { recursive: true });
-      }
-
-      fs.writeFileSync(tokensPath, JSON.stringify(tokens, null, 2));
-      this.logger.log(`Tokens salvos em: ${tokensPath}`);
-    } catch (error) {
-      this.logger.error(`Erro ao salvar tokens: ${error.message}`);
-    }
-  }
-
-  /**
-   * Remove arquivo de tokens
-   */
-  private deleteTokensFile(): void {
-    try {
-      const tokensPath = path.resolve(this.config.tokens_file);
-      if (fs.existsSync(tokensPath)) {
-        fs.unlinkSync(tokensPath);
-        this.logger.log('Arquivo de tokens removido');
-      }
-    } catch (error) {
-      this.logger.error(`Erro ao remover arquivo de tokens: ${error.message}`);
-    }
-  }
-
-  // Métodos auxiliares para gerenciar state (em produção, usar Redis)
-  private states: Set<string> = new Set();
-
-  private saveState(state: string): void {
-    this.states.add(state);
-    // Remove state após 10 minutos
-    setTimeout(() => this.states.delete(state), 10 * 60 * 1000);
-  }
-
-  private verifyState(state: string): boolean {
-    const isValid = this.states.has(state);
-    if (isValid) {
-      this.states.delete(state); // Use apenas uma vez
-    }
-    return isValid;
+    this.accountContext.account.oauthStateHash = null;
+    this.accountContext.account.oauthStateExpiresAt = null;
+    await this.persistAccount();
   }
 
   // Emitir Nota Fiscal de Serviço (NFSe)
@@ -633,6 +509,8 @@ export class BlingService {
         {
           method: 'POST',
           headers: {
+            'enable-jwt': '1',
+
             'Authorization': `Bearer ${this.tokens?.access_token}`,
             'Content-Type': 'application/json',
             'Accept': 'application/json'
@@ -680,6 +558,8 @@ export class BlingService {
         {
           method: 'POST',
           headers: {
+            'enable-jwt': '1',
+
             'Authorization': `Bearer ${this.tokens?.access_token}`,
             'Content-Type': 'application/json',
             'Accept': 'application/json'
@@ -922,6 +802,8 @@ export class BlingService {
         {
           method: 'GET',
           headers: {
+            'enable-jwt': '1',
+
             'Authorization': `Bearer ${this.tokens?.access_token}`,
             'Content-Type': 'application/json',
             'Accept': 'application/json'
@@ -989,6 +871,8 @@ export class BlingService {
         {
           method: 'GET',
           headers: {
+            'enable-jwt': '1',
+
             'Authorization': `Bearer ${this.tokens?.access_token}`,
             'Accept': 'application/json'
           },
@@ -1107,6 +991,8 @@ export class BlingService {
         {
           method: 'POST',
           headers: {
+            'enable-jwt': '1',
+
             'Authorization': `Bearer ${this.tokens?.access_token}`,
             'Content-Type': 'application/json',
             'Accept': 'application/json'
@@ -1175,7 +1061,7 @@ export class BlingService {
       console.log(`?? Gerando RPS único para duplicata #${duplicata.numero}: ${numeroRPS} (timestamp: ${timestampGerado})`);
     }
 
-    const currentDate = new Date().toISOString().split('T')[0]; // Format: YYYY-MM-DD
+    const currentDate = this.dataEmissaoHoje();
 
     console.log(`?? Criando dados NFSe usando dados do Bling para contato ID: ${dadosContatoBling.id}`);
     console.log(`?? Dados do contato do Bling:`, JSON.stringify(dadosContatoBling, null, 2));
@@ -1240,13 +1126,14 @@ export class BlingService {
   /**
    * Configurar código de serviço a ser usado nas NFSe
    */
-  configurarCodigoServico(codigo: string): boolean {
+  async configurarCodigoServico(codigo: string): Promise<boolean> {
     if (!this.codigosServico[codigo]) {
       this.logger.error(`Código de serviço inválido: ${codigo}`);
       return false;
     }
 
-    this.codigoServicoAtual = codigo;
+    this.accountContext.account.serviceCode = codigo;
+    await this.persistAccount();
     this.logger.log(`Código de serviço configurado para: ${codigo} - ${this.codigosServico[codigo].descricao}`);
     return true;
   }
@@ -1254,13 +1141,14 @@ export class BlingService {
   /**
    * Configurar parcela a ser usada nas NFSe
    */
-  configurarParcela(parcela: number): boolean {
+  async configurarParcela(parcela: number): Promise<boolean> {
     if (!Number.isInteger(parcela) || parcela < 1 || parcela > 12) {
       this.logger.error(`Número de parcela inválido: ${parcela}. Deve ser entre 1 e 12.`);
       return false;
     }
 
-    this.parcelaAtual = parcela;
+    this.accountContext.account.installment = parcela;
+    await this.persistAccount();
     this.logger.log(`Parcela configurada para: ${parcela}`);
     return true;
   }
@@ -1309,6 +1197,8 @@ export class BlingService {
         {
           method: 'GET',
           headers: {
+            'enable-jwt': '1',
+
             'Authorization': `Bearer ${this.tokens?.access_token}`,
             'Accept': 'application/json'
           },
@@ -1361,6 +1251,8 @@ export class BlingService {
           {
             method: 'GET',
             headers: {
+              'enable-jwt': '1',
+
               'Authorization': `Bearer ${this.tokens?.access_token}`,
               'Accept': 'application/json'
             },
@@ -1442,7 +1334,7 @@ export class BlingService {
 
       // Construir query params
       const queryParams = new URLSearchParams();
-      
+
       if (params.pagina) queryParams.append('pagina', params.pagina.toString());
       if (params.limite) queryParams.append('limite', params.limite.toString());
       if (params.numero) queryParams.append('numero', params.numero.toString());
@@ -1460,9 +1352,13 @@ export class BlingService {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 30000);
 
+      await this.waitForBlingRateLimit();
+
       const response = await fetch(url, {
         method: 'GET',
         headers: {
+          'enable-jwt': '1',
+
           'Authorization': `Bearer ${this.tokens?.access_token}`,
           'Accept': 'application/json'
         },
@@ -1527,14 +1423,22 @@ export class BlingService {
   /**
    * Obter formas de pagamento disponíveis
    */
-  async obterFormasPagamento(): Promise<any[]> {
-    try {
-      const response = await this.makeAuthenticatedRequest(`/Api/v3/formas-pagamentos`);
-      return response.data || [];
-    } catch (error) {
-      this.logger.error(`Erro ao obter formas de pagamento: ${error.message}`);
-      return [];
+  async obterFormasPagamento(): Promise<{ id: number; descricao: string }[]> {
+    const formas: { id: number; descricao: string }[] = [];
+    const limite = 100;
+    for (let pagina = 1; ; pagina++) {
+      const response = await this.makeAuthenticatedRequest(
+        `/Api/v3/formas-pagamentos?pagina=${pagina}&limite=${limite}&situacao=1`,
+      );
+      if (!Array.isArray(response?.data)) {
+        throw new BadRequestException('Resposta inválida ao consultar formas de pagamento no Bling.');
+      }
+      for (const forma of response.data) {
+        if (forma.situacao !== 0) formas.push({ id: forma.id, descricao: forma.descricao });
+      }
+      if (response.data.length < limite) break;
     }
+    return formas;
   }
 
   /**
@@ -1566,16 +1470,16 @@ export class BlingService {
     formaPagamentoId: number
   ): Promise<any> {
     const valorTotal = servicos.reduce((sum, s) => sum + parseFloat(s.valor || 0), 0);
-    
+
     // Gerar número RPS: número do pedido + números aleatórios = 8 dígitos
     const numeroPedido = String(pedido.numero);
     const digitosRestantes = 8 - numeroPedido.length;
-    const aleatorio = digitosRestantes > 0 
+    const aleatorio = digitosRestantes > 0
       ? Math.floor(Math.random() * Math.pow(10, digitosRestantes)).toString().padStart(digitosRestantes, '0')
       : '';
     const numeroRPS = `${numeroPedido}${aleatorio}`.slice(0, 8);
-    
-    const dataHoje = new Date().toISOString().split('T')[0];
+
+    const dataHoje = this.dataEmissaoHoje();
 
     // Payload baseado na documentação oficial do Bling API v3
     // POST /nfse - NotasServicosDadosBaseDTO_POST + NotasServicosDadosDTO_POST
@@ -1583,9 +1487,10 @@ export class BlingService {
       // Campos de NotasServicosDadosBase (obrigatórios: numeroRPS, serie, contato)
       numeroRPS: numeroRPS,
       serie: "1",
-      
+
       // Campos de NotasServicosDadosDTO_POST
       data: dataHoje,
+      dataEmissao: dataHoje,
       baseCalculo: valorTotal,
       reterISS: false,
       desconto: 0,
@@ -1597,7 +1502,7 @@ export class BlingService {
           codigoSituacaoTributaria: "000"
         }
       },
-      
+
       // Contato - NotasServicosContatoBaseDTO (obrigatórios: id, nome, numeroDocumento, email)
       // + NotasServicosContatoDTO (opcionais: ie, telefone, im, endereco)
       contato: {
@@ -1606,14 +1511,14 @@ export class BlingService {
         numeroDocumento: contato.numeroDocumento || contato.cpfCnpj || "",
         email: contato.email || "naotem@email.com"
       },
-      
+
       // Serviços - NotasServicosServicoDTO (obrigatórios: codigo, descricao, valor)
       servicos: [{
         codigo: "050801", // Código de serviço
         descricao: "Serviços de Estética Animal (banho e tosa)",
         valor: valorTotal
       }],
-      
+
       // Parcelas - NotasServicosParcelaDTO (obrigatórios: data, valor)
       parcelas: [{
         data: dataHoje,
@@ -1635,7 +1540,7 @@ export class BlingService {
     if (contato.celular || contato.telefone) {
       payload.contato.telefone = contato.celular || contato.telefone;
     }
-    
+
     // Adicionar endereço se existir
     if (contato.endereco?.geral) {
       const endGeral = contato.endereco.geral;
@@ -1677,10 +1582,15 @@ export class BlingService {
     for (const pedidoId of pedidoIds) {
       try {
         console.log(`🔵 [Service] Processando pedido ${pedidoId}...`);
-        
+
         // 1. Buscar detalhes do pedido
         const pedido = await this.obterDetalhesPedidoVenda(pedidoId);
         console.log(`🔵 [Service] Pedido ${pedidoId} carregado:`, pedido?.numero);
+
+        if (Number(pedido.situacao?.id) === 2) {
+          resultados.push({ pedidoId, status: 'ignorado', mensagem: 'Pedido cancelado' });
+          continue;
+        }
 
         // 2. Verificar se é consumidor final
         if (this.isConsumidorFinal(pedido)) {
@@ -1742,8 +1652,11 @@ export class BlingService {
           continue;
         }
 
-        // 7. Forma de pagamento fixa: Dinheiro (id: 2222749)
-        const formaPagamentoId = 2222749;
+        // 7. Forma de pagamento configurada para esta conta
+        const formaPagamentoId = Number(this.accountContext.account.paymentMethodId);
+        if (!Number.isSafeInteger(formaPagamentoId) || formaPagamentoId <= 0) {
+          throw new BadRequestException('Configure a forma de pagamento desta conta antes de gerar RPS.');
+        }
 
         // 8. Construir payload NFSe
         const payload = await this.construirPayloadNFSe(pedido, contato, servicos, formaPagamentoId);
@@ -1803,211 +1716,322 @@ export class BlingService {
     };
   }
 
-  /**
-   * Enviar NFSe para a prefeitura (POST /nfse/{id}/enviar)
-   */
-  async enviarNFSeParaPrefeitura(rpsIds: number[]): Promise<any> {
-    this.logger.log(`Iniciando envio de ${rpsIds.length} NFSe para prefeitura...`);
-    
-    const resultados: any[] = [];
-    let enviados = 0;
-
-    for (const rpsId of rpsIds) {
-      let rps: any = null;
-      
-      try {
-        // Buscar RPS no banco
-        rps = await this.rpsService.buscarPorId(rpsId);
-        if (!rps) {
-          resultados.push({ rpsId, status: 'erro', mensagem: 'RPS não encontrado' });
-          continue;
-        }
-
-        if (!rps.nfseId) {
-          resultados.push({ rpsId, status: 'erro', mensagem: 'NFSe ID não encontrado' });
-          continue;
-        }
-
-        // Atualizar status para processando
-        await this.rpsService.atualizar(rpsId, { status: 'processando' });
-
-        // Enviar para prefeitura
-        this.logger.log(`Enviando NFSe ${rps.nfseId} para prefeitura...`);
-        const response = await this.makeAuthenticatedRequest(`/Api/v3/nfse/${rps.nfseId}/enviar`, {
-          method: 'POST'
-        });
-
-        // Verificar resposta e atualizar status
-        if (response?.data?.numero) {
-          // NFSe emitida com sucesso
-          await this.rpsService.atualizar(rpsId, { 
-            status: 'emitido',
-            numeroNFSe: response.data.numero
-          });
-          enviados++;
-          resultados.push({ 
-            rpsId, 
-            status: 'sucesso', 
-            numeroNFSe: response.data.numero,
-            mensagem: 'NFSe emitida com sucesso' 
-          });
-        } else {
-          // Atualizar como processando (aguardando retorno da prefeitura)
-          resultados.push({ 
-            rpsId, 
-            status: 'processando', 
-            mensagem: 'Enviado para prefeitura, aguardando retorno' 
-          });
-        }
-
-      } catch (error) {
-        this.logger.error(`Erro ao enviar NFSe do RPS ${rpsId}: ${error.message}`);
-        
-        // Para qualquer erro, verificar se a NFSe já está emitida no Bling
-        if (rps?.nfseId) {
-          try {
-            this.logger.log(`Verificando status da NFSe ${rps.nfseId} no Bling...`);
-            const nfseData = await this.makeAuthenticatedRequest(`/Api/v3/nfse/${rps.nfseId}`, { method: 'GET' });
-            
-            // situacao: 1 = Pendente, 2 = Emitida, 3 = Cancelada, 4 = Erro
-            if (nfseData?.data?.situacao === 2 || nfseData?.data?.numero) {
-              this.logger.log(`NFSe ${rps.nfseId} já está emitida com número ${nfseData?.data?.numero}`);
-              await this.rpsService.atualizar(rpsId, { 
-                status: 'emitido',
-                numeroNFSe: nfseData.data.numero || null
-              });
-              resultados.push({ 
-                rpsId, 
-                status: 'sucesso', 
-                numeroNFSe: nfseData.data.numero, 
-                mensagem: 'NFSe já estava emitida no Bling' 
-              });
-              enviados++;
-              continue;
-            }
-          } catch (e) {
-            this.logger.warn(`Não foi possível verificar status da NFSe: ${e.message}`);
-          }
-        }
-        
-        // Se não conseguiu verificar ou não está emitida, marca como erro
-        await this.rpsService.atualizar(rpsId, { 
-          status: 'erro', 
-          mensagemErro: error.message 
-        });
-        resultados.push({ rpsId, status: 'erro', mensagem: error.message });
-      }
-    }
-
-    return {
-      success: true,
-      enviados,
-      total: rpsIds.length,
-      resultados
-    };
+  private situacaoNFSe(nfse: any): 'emitido' | 'erro' | 'pendente' | null {
+    // Bling OpenAPI: 0 pending, 1 issued, 2 available for consultation, 3 cancelled.
+    if (nfse?.situacao === 3) return 'erro';
+    if (nfse?.situacao === 1 || nfse?.situacao === 2) return 'emitido';
+    if (nfse?.situacao === 0) return 'pendente';
+    if (nfse?.situacao === undefined && nfse?.numero) return 'emitido';
+    return null;
   }
 
-  /**
-   * Sincronizar status das NFSe com o Bling
-   */
-  async sincronizarStatusNFSe(): Promise<any> {
-    this.logger.log('Iniciando sincronização de status das NFSe...');
+  async enviarNFSeParaPrefeitura(rpsIds: number[], automatico = false): Promise<any> {
+    const resultados: any[] = [];
+    let enviados = 0;
+    for (const rpsId of [...new Set(rpsIds)]) {
+      if (automatico && !await this.envioAutomaticoHabilitado()) break;
+      const rps = await this.rpsService.buscarPorId(rpsId);
+      if (!rps) { resultados.push({ rpsId, status: 'erro', mensagem: 'RPS não encontrado' }); continue; }
+      // Automatic processing never retries errors or an uncertain previous submission.
+      if (rps.status !== 'pendente' && (automatico || rps.status !== 'erro')) {
+        resultados.push({ rpsId, status: 'ignorado', mensagem: 'RPS já enviado ou em processamento' }); continue;
+      }
+      if (!rps.nfseId) {
+        await this.rpsService.atualizar(rpsId, { status: 'erro', mensagemErro: 'NFSe ID não encontrado. Revise este RPS.' });
+        resultados.push({ rpsId, status: 'erro', mensagem: 'NFSe ID não encontrado' }); continue;
+      }
+      // Renew the token before claiming the row; authentication failures cannot strand the RPS.
+      await this.ensureValidToken();
+      if (!await this.rpsService.iniciarEnvio(rpsId, rps.status as 'pendente' | 'erro')) {
+        resultados.push({ rpsId, status: 'ignorado', mensagem: 'RPS assumido por outro processamento' }); continue;
+      }
+      let envioIniciado = false;
+      try {
+        // Check the remote note before any POST (including explicit manual retries).
+        const atual = await this.makeAuthenticatedRequest('/Api/v3/nfse/' + rps.nfseId);
+        const situacao = this.situacaoNFSe(atual?.data);
+        if (situacao === 'emitido') {
+          await this.rpsService.atualizar(rpsId, { status: 'emitido', numeroNFSe: atual.data.numero || rps.numeroNFSe, mensagemErro: '' });
+          enviados++;
+          resultados.push({ rpsId, status: 'sucesso', mensagem: 'NFSe já emitida no Bling' }); continue;
+        }
+        if (situacao !== 'pendente') {
+          const mensagem = situacao === 'erro' ? 'NFSe cancelada no Bling. Revise este RPS.' : 'Não foi possível confirmar a situação da NFSe. Revise este RPS.';
+          await this.rpsService.atualizar(rpsId, { status: 'erro', mensagemErro: mensagem });
+          resultados.push({ rpsId, status: 'erro', mensagem }); continue;
+        }
+        const dataEmissao = atual.data?.dataEmissao;
+        const dataHoje = this.dataEmissaoHoje();
+        if (typeof dataEmissao === 'string' && /^\d{4}-\d{2}-\d{2}/.test(dataEmissao) && dataEmissao.slice(0, 10) > dataHoje) {
+          const formatar = (data: string) => data.slice(0, 10).split('-').reverse().join('/');
+          const mensagem = `Data de emissão futura no Bling: ${formatar(dataEmissao)}. Hoje em Brasília é ${formatar(dataHoje)}. Abra esta nota no Bling, revise a data de emissão e depois tente novamente. A alteração das configurações não atualiza notas já criadas.`;
+          await this.rpsService.atualizar(rpsId, { status: 'erro', mensagemErro: mensagem });
+          resultados.push({ rpsId, status: 'erro', mensagem });
+          continue;
+        }
+        if (automatico && !await this.envioAutomaticoHabilitado()) {
+          await this.rpsService.atualizarSeStatus(rpsId, 'processando', { status: rps.status, mensagemErro: rps.mensagemErro });
+          break;
+        }
+        envioIniciado = true;
+        const response = await this.makeAuthenticatedRequest('/Api/v3/nfse/' + rps.nfseId + '/enviar', { method: 'POST' });
+        const resultStatus = this.situacaoNFSe(response?.data);
+        const status = resultStatus === 'emitido' ? 'emitido' : resultStatus === 'erro' ? 'erro' : 'processando';
+        await this.rpsService.atualizar(rpsId, {
+          status, numeroNFSe: response?.data?.numero || rps.numeroNFSe,
+          mensagemErro: status === 'erro' ? 'NFSe cancelada no Bling.' : '',
+        });
+        if (status === 'emitido') enviados++;
+        resultados.push({ rpsId, status: status === 'emitido' ? 'sucesso' : status, mensagem: status === 'processando' ? 'Enviado; aguardando confirmação do Bling' : 'Situação da NFSe atualizada' });
+      } catch (error) {
+        // A timeout/5xx after POST may have reached the municipality. Reconcile, never resend automatically.
+        const rejeitado = error instanceof BlingApiException && [400, 401, 403, 404, 422].includes(error.upstreamStatus);
+        const status = envioIniciado ? (rejeitado ? 'erro' : 'processando') : (rejeitado ? 'erro' : rps.status);
+        const mensagem = envioIniciado && !rejeitado
+          ? 'Envio sem confirmação. Aguardando consulta ao Bling, sem reenviar: ' + error.message
+          : error.message;
+        await this.rpsService.atualizar(rpsId, { status, mensagemErro: mensagem });
+        resultados.push({ rpsId, status, mensagem });
+      }
+    }
+    return { success: true, enviados, total: rpsIds.length, resultados };
+  }
 
-    try {
-      // Buscar RPS pendentes, processando e emitidos sem número de nota
-      const { data: rpsPendentes } = await this.rpsService.listarFila({ 
-        pagina: 1, 
-        limite: 1000,
-        status: 'pendente'
-      });
-
-      const { data: rpsProcessando } = await this.rpsService.listarFila({ 
-        pagina: 1, 
-        limite: 1000,
-        status: 'processando'
-      });
-
-      // Buscar também os emitidos para verificar se têm número de nota
-      const { data: rpsEmitidos } = await this.rpsService.listarFila({ 
-        pagina: 1, 
-        limite: 1000,
-        status: 'emitido'
-      });
-
-      // Filtrar emitidos sem número de nota
-      const emitidosSemNumero = rpsEmitidos.filter((rps: any) => !rps.numeroNFSe);
-      this.logger.log(`Encontrados ${emitidosSemNumero.length} registros emitidos sem número de nota`);
-
-      const rpsParaVerificar = [...rpsPendentes, ...rpsProcessando, ...emitidosSemNumero];
-      let atualizados = 0;
-      let corrigidos = 0;
-
-      for (const rps of rpsParaVerificar) {
-        if (!rps.nfseId) continue;
-
-        try {
-          // Buscar NFSe no Bling
-          const response = await this.makeAuthenticatedRequest(`/Api/v3/nfse/${rps.nfseId}`);
-          
-          if (response?.data) {
-            const nfse = response.data;
-            
-            // Situação: 0=Pendente, 1=Emitida, 2=Disponível, 3=Cancelada
-            let novoStatus = rps.status;
-            
-            if (nfse.situacao === 1 || nfse.situacao === 2) {
-              novoStatus = 'emitido';
-            } else if (nfse.situacao === 3) {
-              novoStatus = 'erro';
-            } else if (nfse.situacao === 0) {
-              novoStatus = 'pendente';
-            }
-
-            // Se status mudou ou se precisa atualizar número da nota
-            const precisaAtualizar = novoStatus !== rps.status || 
-                                     (nfse.numero && nfse.numero !== rps.numeroNFSe);
-
-            if (precisaAtualizar) {
-              await this.rpsService.atualizar(rps.id, { 
-                status: novoStatus,
-                numeroNFSe: nfse.numero || rps.numeroNFSe
-              });
-              
-              if (rps.status === 'emitido' && !rps.numeroNFSe && nfse.numero) {
-                corrigidos++;
-                this.logger.log(`✅ Corrigido RPS ${rps.id}: adicionado número ${nfse.numero}`);
-              } else {
-                atualizados++;
-              }
-            }
-          }
-        } catch (error) {
-          this.logger.warn(`Erro ao verificar NFSe ${rps.nfseId}: ${error.message}`);
-          
-          // Se não encontrou a NFSe no Bling, e status é emitido sem número, volta para pendente
-          if (rps.status === 'emitido' && !rps.numeroNFSe) {
-            await this.rpsService.atualizar(rps.id, { 
-              status: 'pendente',
-              mensagemErro: 'NFSe não encontrada no Bling - status resetado'
-            });
-            corrigidos++;
-            this.logger.log(`⚠️ RPS ${rps.id} resetado para pendente - NFSe não encontrada`);
+  private async sincronizarRegistrosRPS(registros: Awaited<ReturnType<RpsService['listarParaAutomacao']>>, reconciliarExclusoes = false) {
+    let atualizados = 0;
+    let removidos = 0;
+    let falhas = 0;
+    for (const rps of registros) {
+      if (!rps.nfseId) continue;
+      try {
+        const response = await this.makeAuthenticatedRequest('/Api/v3/nfse/' + rps.nfseId);
+        const situacao = this.situacaoNFSe(response?.data);
+        // Pending at Bling can mean the submission has not completed yet. Never requeue it.
+        const status = situacao === 'emitido' || situacao === 'erro' ? situacao : rps.status;
+        const changed = await this.rpsService.atualizarSeStatus(rps.id, rps.status, {
+          status, numeroNFSe: response?.data?.numero || rps.numeroNFSe,
+          mensagemErro: situacao === 'erro' ? 'NFSe cancelada no Bling.' : situacao === 'emitido' ? '' : rps.mensagemErro,
+        });
+        if (changed && (status !== rps.status || (response?.data?.numero && response.data.numero !== rps.numeroNFSe))) atualizados++;
+      } catch (error) {
+        if (reconciliarExclusoes && error instanceof BlingApiException && error.upstreamStatus === 404 && error.upstreamType === 'RESOURCE_NOT_FOUND') {
+          if (await this.rpsService.removerExcluidoNoBling(rps)) {
+            removidos++;
+            continue;
           }
         }
+        falhas++;
+        // Preserve status on network/API failures and move this record to the end of the polling rotation.
+        await this.rpsService.atualizarSeStatus(rps.id, rps.status, { mensagemErro: 'Não foi possível consultar o Bling: ' + error.message });
       }
-
-      this.logger.log(`✅ Sincronização concluída: ${atualizados} atualizados, ${corrigidos} corrigidos`);
-
-      return {
-        success: true,
-        verificados: rpsParaVerificar.length,
-        atualizados,
-        corrigidos
-      };
-
-    } catch (error) {
-      this.logger.error(`Erro na sincronização: ${error.message}`);
-      throw error;
     }
+    return { success: true, verificados: registros.length, atualizados, removidos, falhas, corrigidos: 0 };
+  }
+
+  private readonly progressoMeta = new Map<number, RpsTargetProgress>();
+  private progressoAtual() {
+    const id = this.accountContext.account.id;
+    if (!this.progressoMeta.has(id)) this.progressoMeta.set(id, novoProgressoMeta());
+    return this.progressoMeta.get(id)!;
+  }
+  private registrarProgresso(changes: Partial<RpsTargetProgress>, message?: string, type: 'info' | 'success' | 'warning' | 'error' = 'info') {
+    const progress = this.progressoAtual();
+    Object.assign(progress, changes, { updatedAt: new Date().toISOString() });
+    if (message) progress.eventos = [{ at: progress.updatedAt, message, type }, ...progress.eventos].slice(0, 8);
+    return progress;
+  }
+
+  private readonly candidatosMeta = new Map<number, { target: number; numeroInicial: number | null; pedidos: any[] }>();
+
+  async configurarMetaRps(valor: unknown) {
+    const target = Number(valor);
+    if (!Number.isFinite(target) || target <= 0 || target > 9999999999.99 || Math.abs(Math.round(target * 100) - target * 100) > 0.000001) {
+      throw new BadRequestException('Informe um valor-alvo válido com até duas casas decimais.');
+    }
+    const integracao = this.getIntegrationStatus();
+    if (!integracao.isActive || !integracao.configured) throw new BadRequestException('Conecte a conta Bling antes de iniciar.');
+    if (!this.accountContext.account.paymentMethodId) throw new BadRequestException('Configure a forma de pagamento antes de iniciar.');
+    const valorGerado = await this.rpsService.obterValorGerado();
+    const status = valorGerado > target ? 'concluida' : 'ativa';
+    // Starting a generation target leaves dispatch under the queue controls.
+    await this.blingIntegrationRepository.update({ id: this.accountContext.account.id }, {
+      rpsTarget: target, rpsTargetStatus: status, rpsTargetMessage: null, autoRpsEnabled: false,
+    });
+    this.candidatosMeta.delete(this.accountContext.account.id);
+    this.progressoMeta.set(this.accountContext.account.id, novoProgressoMeta());
+    this.registrarProgresso({ stage: status === 'concluida' ? 'concluida' : 'preparando' }, status === 'concluida' ? 'O histórico já ultrapassa o alvo.' : 'Meta iniciada. Preparando a busca dos pedidos.');
+    return { target, status };
+  }
+
+  async cancelarMetaRps() {
+    this.candidatosMeta.delete(this.accountContext.account.id);
+    await this.blingIntegrationRepository.update({ id: this.accountContext.account.id }, { rpsTargetStatus: 'pausada' });
+    this.registrarProgresso({ stage: 'pausada', running: false, pedidoAtual: null }, 'Geração pausada pelo usuário.');
+    return { status: 'pausada' };
+  }
+
+  async statusMetaRps() {
+    const account = this.accountContext.account;
+    const valorGerado = await this.rpsService.obterValorGerado();
+    const progress = this.progressoMeta.get(account.id) ?? null;
+    // The persisted checkpoint protects against duplicates after a restart. During a live
+    // creation it must be presented as working rather than as a false review warning.
+    const criando = account.rpsTargetStatus === 'revisao' && progress?.running && progress.stage === 'gerando';
+    return { target: account.rpsTarget == null ? null : Number(account.rpsTarget),
+      status: criando ? 'ativa' : account.rpsTargetStatus, message: criando ? null : account.rpsTargetMessage, valorGerado, progress,
+      falhas: (account.rpsTargetFailures ?? []).filter(falha => !criando || falha.numeroPedido !== String(progress?.pedidoAtual)) };
+  }
+
+  private mensagemFalhaMeta(message: string): string {
+    try {
+      const start = message.indexOf('{');
+      if (start >= 0) {
+        const error = JSON.parse(message.slice(start)).error;
+        const fields = Array.isArray(error?.fields) ? error.fields.map(field => field.msg || field.message).filter(Boolean) : [];
+        return [error?.message, ...fields].filter(Boolean).join(' ') || message;
+      }
+    } catch { /* Keep the readable original for non-JSON failures. */ }
+    return message;
+  }
+
+  private async registrarFalhaPedidoMeta(pedido: any, mensagem: string | null) {
+    const account = this.accountContext.account;
+    const falhas = (account.rpsTargetFailures ?? []).filter(item => item.pedidoId !== Number(pedido.id));
+    if (mensagem) falhas.push({ pedidoId: Number(pedido.id), numeroPedido: String(pedido.numero), mensagem, at: new Date().toISOString() });
+    await this.blingIntegrationRepository.update({ id: account.id }, { rpsTargetFailures: falhas });
+    account.rpsTargetFailures = falhas;
+  }
+
+  private async atualizarMeta(status: string, message: string | null = null) {
+    await this.blingIntegrationRepository.update({ id: this.accountContext.account.id }, { rpsTargetStatus: status, rpsTargetMessage: message });
+    this.accountContext.account.rpsTargetStatus = status;
+    if (status === 'concluida' || status === 'sem_pedidos') {
+      this.candidatosMeta.delete(this.accountContext.account.id);
+      this.registrarProgresso({ stage: status, pedidoAtual: null }, status === 'concluida' ? 'Alvo ultrapassado. Geração concluída.' : 'Busca concluída sem mais pedidos elegíveis.');
+    }
+  }
+
+  async processarMetaRps() {
+    if (this.accountContext.account.rpsTargetStatus !== 'ativa') return;
+    this.registrarProgresso({ running: true, stage: 'aguardando' });
+    try { await this.executarMetaRps(); }
+    catch (error) {
+      this.registrarProgresso({ stage: 'erro' }, 'Não foi possível continuar: ' + error.message, 'error');
+      throw error;
+    } finally { this.progressoAtual().running = false; }
+  }
+
+  private async executarMetaRps() {
+    const account = this.accountContext.account;
+    if (account.rpsTargetStatus !== 'ativa') return;
+    const valorGerado = await this.rpsService.obterValorGerado();
+    if (valorGerado > Number(account.rpsTarget)) { await this.atualizarMeta('concluida'); return; }
+    let candidatos = this.candidatosMeta.get(account.id);
+    if (!candidatos || candidatos.target !== Number(account.rpsTarget) || candidatos.numeroInicial !== account.initialOrderNumber) {
+      this.registrarProgresso({ stage: 'buscando', paginas: 0, candidatos: 0 }, 'Buscando pedidos em todas as páginas.');
+      const pedidos: any[] = [];
+      const gerados = await this.rpsService.obterIdsPedidosGerados();
+      const falhas = new Set((account.rpsTargetFailures ?? []).map(item => item.pedidoId));
+      for (let pagina = 1; ; pagina++) {
+        const response = await this.getPedidosVenda({ pagina, limite: 100 });
+        if (!Array.isArray(response.data)) throw new Error('Resposta inválida ao buscar pedidos.');
+        pedidos.push(...response.data.filter(pedido => pedido.id && pedido.data
+          && Number(pedido.situacao?.id) !== 2
+          && (!account.initialOrderNumber || Number(pedido.numero) >= account.initialOrderNumber)
+          && !gerados.has(String(pedido.id)) && !falhas.has(Number(pedido.id))));
+        this.registrarProgresso({ paginas: pagina, candidatos: pedidos.length });
+        if (response.data.length < 100) break;
+      }
+      pedidos.sort((a, b) => String(a.data).localeCompare(String(b.data)) || Number(a.numero) - Number(b.numero));
+      candidatos = { target: Number(account.rpsTarget), numeroInicial: account.initialOrderNumber, pedidos };
+      this.candidatosMeta.set(account.id, candidatos);
+      this.registrarProgresso({ stage: 'aguardando' }, `Busca concluída: ${pedidos.length} pedidos candidatos, dos mais antigos para os mais novos.`);
+    }
+    while (candidatos.pedidos.length) {
+      const pedido = candidatos.pedidos.shift();
+      this.registrarProgresso({ examinados: this.progressoAtual().examinados + 1, pedidoAtual: Number(pedido.numero) });
+      // Other operations may have created this RPS since the initial scan.
+      if (await this.rpsService.buscarPorPedidoId(pedido.id)) continue;
+      this.registrarProgresso({ stage: 'gerando' }, `Preparando RPS do pedido #${pedido.numero}.`);
+      // If the process stops during creation, require review rather than creating a duplicate.
+      await this.registrarFalhaPedidoMeta(pedido, 'Criação sem confirmação. Confira este pedido no Bling antes de tentar novamente.');
+      await this.atualizarMeta('revisao', 'Criação em andamento ou sem confirmação. Revise o pedido no Bling antes de reiniciar.');
+      const result = await this.gerarRPSParaPedidos([pedido.id]);
+      const item = result.resultados[0];
+      if (item?.status === 'ignorado') {
+        await this.registrarFalhaPedidoMeta(pedido, null);
+        this.registrarProgresso({ ignorados: this.progressoAtual().ignorados + 1, stage: 'aguardando' }, `Pedido #${pedido.numero} ignorado: ${item.mensagem || 'não elegível'}.`, 'warning');
+        await this.atualizarMeta('ativa'); continue;
+      }
+      if (item?.status !== 'sucesso') {
+        const message = this.mensagemFalhaMeta(item?.mensagem || 'Falha ao criar RPS.');
+        await this.registrarFalhaPedidoMeta(pedido, message);
+        this.registrarProgresso({ stage: 'aguardando', erros: this.progressoAtual().erros + 1, pedidoAtual: null }, `Pedido #${pedido.numero}: ${message} Seguindo para o próximo.`, 'error');
+        await this.atualizarMeta('ativa'); return;
+      }
+      await this.registrarFalhaPedidoMeta(pedido, null);
+      const criado = await this.rpsService.buscarPorPedidoId(pedido.id);
+      this.registrarProgresso({ stage: 'aguardando', gerados: this.progressoAtual().gerados + 1, pedidoAtual: null,
+        ultimoRps: criado ? { pedido: criado.numeroPedido, numeroRps: criado.numeroRPS, valor: Number(criado.valorTotal), at: new Date().toISOString() } : null,
+      }, `RPS gerado para o pedido #${pedido.numero}.`, 'success');
+      const totalGerado = await this.rpsService.obterValorGerado();
+      await this.atualizarMeta(totalGerado > Number(account.rpsTarget) ? 'concluida' : 'ativa');
+      return;
+    }
+    this.candidatosMeta.delete(account.id);
+    await this.atualizarMeta('sem_pedidos', 'Não há mais pedidos elegíveis.');
+  }
+
+  async resetarProcessamentoRps(id: number) {
+    const rps = await this.rpsService.buscarPorId(id);
+    if (!rps) throw new BadRequestException('RPS não encontrado nesta conta.');
+    if (rps.status !== 'processando') return { status: rps.status, message: 'Este RPS já saiu do processamento. Atualizamos a lista.' };
+    let status = 'erro';
+    let message = 'Processamento resetado para revisão manual. O registro não possui ID da NFS-e no Bling.';
+    if (rps.nfseId) {
+      try {
+        const response = await this.makeAuthenticatedRequest('/Api/v3/nfse/' + rps.nfseId);
+        const situacao = this.situacaoNFSe(response?.data);
+        if (situacao === 'emitido') {
+          status = 'emitido';
+          message = 'O Bling confirmou que a nota já foi emitida. Status atualizado.';
+          const changed = await this.rpsService.atualizarSeStatus(id, 'processando', {
+            status, numeroNFSe: response.data.numero || rps.numeroNFSe, mensagemErro: '',
+          });
+          return { status: changed ? status : (await this.rpsService.buscarPorId(id))?.status, message };
+        }
+        message = situacao === 'erro' ? 'Processamento resetado: nota cancelada no Bling. Revise o registro.'
+          : 'Processamento resetado para revisão manual. O Bling ainda não confirmou a emissão. Confira o envio anterior antes de emitir novamente. Nenhum novo envio foi feito.';
+      } catch (error) {
+        if (!(error instanceof BlingApiException) || error.upstreamStatus !== 404 || error.upstreamType !== 'RESOURCE_NOT_FOUND') throw error;
+        message = 'Processamento resetado para revisão manual: a nota não foi encontrada no Bling. Confira o ID e o histórico de emissão antes de tentar novamente.';
+      }
+    }
+    // Keep the record and remove it from automatic dispatch. An uncertain previous
+    // submission must never be returned to "pendente" and silently sent again.
+    const changed = await this.rpsService.atualizarSeStatus(id, 'processando', { status, mensagemErro: message });
+    return { status: changed ? status : (await this.rpsService.buscarPorId(id))?.status, message };
+  }
+
+  async processarFilaAutomatica() {
+    await this.ensureValidToken();
+    const processando = await this.rpsService.listarParaAutomacao('processando');
+    await this.sincronizarRegistrosRPS(processando);
+    if (!await this.envioAutomaticoHabilitado()) return { success: true, enviados: 0, total: 0, resultados: [] };
+    const pendentes = await this.rpsService.listarParaAutomacao('pendente');
+    return this.enviarNFSeParaPrefeitura(pendentes.map(rps => rps.id), true);
+  }
+
+  async sincronizarStatusNFSe(): Promise<any> {
+    const registros: Awaited<ReturnType<RpsService['listarParaAutomacao']>> = [];
+    // Collect all pages before reconciliation, so removals cannot shift page offsets.
+    for (const status of ['pendente', 'erro', 'processando', 'emitido']) {
+      for (let pagina = 1; ; pagina++) {
+        const result = await this.rpsService.listarFila({ pagina, limite: 1000, status });
+        registros.push(...result.data.filter(rps => status !== 'emitido' || !rps.numeroNFSe));
+        if (!result.data.length || pagina * 1000 >= result.total) break;
+      }
+    }
+    return this.sincronizarRegistrosRPS(registros, true);
   }
 }

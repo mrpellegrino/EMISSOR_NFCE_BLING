@@ -1,11 +1,21 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
+import { BlingIntegration } from './bling-integration.entity';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, Index, ManyToOne, JoinColumn } from 'typeorm';
 
 @Entity('pedidos_venda_rps')
+@Index('UQ_rps_account_order', ['accountId', 'pedidoVendaId'], { unique: true })
 export class PedidoVendaRPS {
   @PrimaryGeneratedColumn()
   id: number;
 
-  @Column({ type: 'bigint', unique: true })
+  // Null is reserved for legacy records awaiting an explicit owner migration.
+  @Column({ type: 'int', nullable: true })
+  accountId: number;
+
+  @ManyToOne(() => BlingIntegration, { onDelete: 'RESTRICT' })
+  @JoinColumn({ name: 'accountId' })
+  account: BlingIntegration;
+
+  @Column({ type: 'bigint' })
   pedidoVendaId: string; // ID do pedido no Bling
 
   @Column({ type: 'bigint' })

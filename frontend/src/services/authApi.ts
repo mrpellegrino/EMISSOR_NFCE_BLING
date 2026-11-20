@@ -1,4 +1,4 @@
-const API_BASE_URL = 'http://localhost:3000/api';
+const API_BASE_URL = (import.meta.env.VITE_API_URL || '/api').replace(/\/$/, '');
 
 export interface LoginRequest {
   email: string;
@@ -25,6 +25,22 @@ export interface ApiError {
   statusCode: number;
 }
 
+export class AuthApiError extends Error {
+  readonly statusCode: number;
+  readonly retryAfterSeconds?: number;
+
+  constructor(
+    message: string,
+    statusCode: number,
+    retryAfterSeconds?: number,
+  ) {
+    super(message);
+    this.name = 'AuthApiError';
+    this.statusCode = statusCode;
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
 class AuthApi {
   private getAuthHeader(): HeadersInit {
     const token = localStorage.getItem('access_token');
@@ -41,8 +57,19 @@ class AuthApi {
     });
 
     if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.message || 'Erro ao realizar login');
+      const error = await response.json().catch(() => ({}));
+      const retryAfterHeader = response.headers.get('Retry-After');
+      const retryAfterSeconds =
+        typeof error.retryAfterSeconds === 'number'
+          ? error.retryAfterSeconds
+          : retryAfterHeader
+            ? Number(retryAfterHeader)
+            : undefined;
+      throw new AuthApiError(
+        error.message || 'Erro ao realizar login',
+        response.status,
+        Number.isFinite(retryAfterSeconds) ? retryAfterSeconds : undefined,
+      );
     }
 
     const result = await response.json();

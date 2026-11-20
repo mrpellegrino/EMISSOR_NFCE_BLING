@@ -1,74 +1,61 @@
-import { Controller, Get, Post, Delete, Query, Body, Res, Param, Logger, BadRequestException, UseGuards, Request } from '@nestjs/common';
+import { RpsWorkerService } from './rps-worker.service';
+import { AccountInterceptor } from './account.interceptor';
+import { LocalAccountRead } from './local-account-read.decorator';
+import { Controller, Get, Post, Delete, Query, Body, Param, Logger, BadRequestException, UseGuards, UseInterceptors, Request } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
-import type { Response } from 'express';
 import { BlingService } from './bling.service';
 import { RpsService } from './rps.service';
 
 @Controller('bling')
+@UseGuards(JwtAuthGuard)
+@UseInterceptors(AccountInterceptor)
 export class BlingController {
   private readonly logger = new Logger(BlingController.name);
 
   constructor(
     private readonly blingService: BlingService,
     private readonly rpsService: RpsService,
+    private readonly rpsWorker: RpsWorkerService,
   ) { }
 
   /**
    * Obtém status da integração
    * GET /bling/integration
    */
-  @UseGuards(JwtAuthGuard)
-  @Get('integration')
-  async getIntegrationStatus(@Request() req: any) {
-    try {
-      const baseStatus = this.blingService.getIntegrationStatus();
-      
-      // Buscar número inicial do banco de dados para o usuário autenticado
-      const userId = req.user?.id;
-      if (userId) {
-        const initialOrderNumber = await this.blingService.getInitialOrderNumberForUser(userId);
-        if (initialOrderNumber !== null) {
-          baseStatus.initialOrderNumber = initialOrderNumber;
-        }
-      }
-      
-      return baseStatus;
-    } catch (error) {
-      this.logger.error(`Erro ao obter status da integração: ${error.message}`);
-      throw new BadRequestException('Erro ao obter status da integração');
-    }
+  @Get('fila-rps/automacao')
+  @LocalAccountRead()
+  getAutomationStatus() {
+    const worker = this.rpsWorker.getStatus();
+    const account = this.blingService.getIntegrationStatus();
+    return { ...worker, globalEnabled: worker.enabled, accountEnabled: account.autoRpsEnabled,
+      enabled: worker.enabled && account.autoRpsEnabled, connected: account.isActive };
   }
 
-  /**
-   * Salva configurações de integração
-   * POST /bling/integration
-   */
+  @Get('meta-rps')
+  @LocalAccountRead()
+  statusMetaRps() { return this.blingService.statusMetaRps(); }
+
+  @Post('meta-rps')
+  configurarMetaRps(@Body() body: { valor: number }) {
+    if (!this.rpsWorker.getStatus().enabled) throw new BadRequestException('A automação está desativada no servidor.');
+    return this.blingService.configurarMetaRps(body.valor);
+  }
+
+  @Post('meta-rps/pausar')
+  pausarMetaRps() { return this.blingService.cancelarMetaRps(); }
+
+  @Get('integration')
+  getIntegrationStatus() { return this.blingService.getIntegrationStatus(); }
+
+  @Get('formas-pagamentos')
+  async getFormasPagamento() {
+    return { data: await this.blingService.obterFormasPagamento() };
+  }
+
   @Post('integration')
-  saveIntegration(@Body() body: { clientId: string, clientSecret: string, initialOrderNumber?: number | null }) {
-    try {
-      if (!body.clientId || !body.clientSecret) {
-        throw new BadRequestException('Client ID e Client Secret são obrigatórios');
-      }
-
-      this.blingService.saveCredentials(body.clientId, body.clientSecret);
-
-      if (body.initialOrderNumber !== undefined) {
-        const parsed = body.initialOrderNumber === null ? null : Number(body.initialOrderNumber);
-        if (parsed !== null && (!Number.isInteger(parsed) || parsed < 0)) {
-          throw new BadRequestException('initialOrderNumber deve ser um número inteiro positivo ou null');
-        }
-        this.blingService.setInitialOrderNumber(parsed);
-      }
-
-      return {
-        message: 'Configuração salva com sucesso',
-        configured: true,
-        isActive: false
-      };
-    } catch (error) {
-      this.logger.error(`Erro ao salvar integração: ${error.message}`);
-      throw new BadRequestException(`Erro ao salvar integração: ${error.message}`);
-    }
+  async saveIntegration(@Body() body: { clientId: string; clientSecret?: string; initialOrderNumber?: number | null; paymentMethodId?: string | null }) {
+    await this.blingService.saveCredentials(body.clientId, body.clientSecret, body.initialOrderNumber, body.paymentMethodId);
+    return { message: 'Configuração salva com sucesso', ...this.blingService.getIntegrationStatus() };
   }
 
   /**
@@ -87,7 +74,7 @@ export class BlingController {
       if (!userId) {
         throw new BadRequestException('Usuário inválido');
       }
-      await this.blingService.setInitialOrderNumberForUser(userId, value);
+      await this.blingService.setInitialOrderNumber(value);
       return { message: 'Número inicial atualizado com sucesso', initialOrderNumber: value };
     } catch (error) {
       this.logger.error(`Erro ao atualizar número inicial: ${error.message}`);
@@ -100,10 +87,9 @@ export class BlingController {
    * DELETE /bling/integration
    */
   @Delete('integration')
-  removeIntegration() {
+  async removeIntegration() {
     try {
-      this.blingService.removeCredentials();
-      this.blingService.clearTokens();
+      await this.blingService.removeCredentials();
 
       return {
         message: 'Integração removida com sucesso'
@@ -119,16 +105,8 @@ export class BlingController {
    * GET /bling/authorize
    */
   @Get('authorize')
-  startAuthentication(@Res() res: Response) {
-    try {
-      const authUrl = this.blingService.generateAuthorizationUrl();
-
-      this.logger.log('Redirecionando para autenticação Bling');
-      return res.redirect(authUrl);
-    } catch (error) {
-      this.logger.error(`Erro ao iniciar autenticação: ${error.message}`);
-      throw new BadRequestException('Erro ao iniciar autenticação');
-    }
+  async startAuthentication() {
+    return { authorizationUrl: await this.blingService.generateAuthorizationUrl() };
   }
 
   /**
@@ -136,9 +114,9 @@ export class BlingController {
    * POST /bling/deactivate
    */
   @Post('deactivate')
-  deactivateIntegration() {
+  async deactivateIntegration() {
     try {
-      this.blingService.clearTokens();
+      await this.blingService.clearTokens();
 
       return {
         message: 'Integração desativada com sucesso'
@@ -146,41 +124,6 @@ export class BlingController {
     } catch (error) {
       this.logger.error(`Erro ao desativar integração: ${error.message}`);
       throw new BadRequestException(`Erro ao desativar integração: ${error.message}`);
-    }
-  }
-
-  /**
-   * Callback OAuth2 - recebe código de autorização
-   * GET /bling/callback?code=xxx&state=xxx
-   */
-  @Get('callback')
-  async handleCallback(
-    @Query('code') code: string,
-    @Query('state') state: string,
-    @Res() res: Response
-  ) {
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
-
-    try {
-      if (!code) {
-        throw new BadRequestException('Código de autorização não recebido');
-      }
-
-      if (!state) {
-        throw new BadRequestException('State não recebido');
-      }
-
-      this.logger.log(`🔄 Processando callback automático - Code: ${code?.substring(0, 10)}...`);
-
-      await this.blingService.exchangeCodeForTokens(code, state);
-
-      this.logger.log('✅ Autenticação Bling completada com sucesso!');
-
-      return res.redirect(`${frontendUrl}/settings?bling=success`);
-
-    } catch (error) {
-      this.logger.error(`❌ Erro no callback: ${error.message}`);
-      return res.redirect(`${frontendUrl}/settings?bling=error&message=${encodeURIComponent(error.message)}`);
     }
   }
 
@@ -253,9 +196,9 @@ export class BlingController {
    * POST /bling/logout
    */
   @Post('logout')
-  logout() {
+  async logout() {
     try {
-      this.blingService.clearTokens();
+      await this.blingService.clearTokens();
 
       this.logger.log('Logout realizado');
       return {
@@ -273,13 +216,13 @@ export class BlingController {
    * POST /bling/set-tokens
    */
   @Post('set-tokens')
-  setTokens(@Body() body: any) {
+  async setTokens(@Body() body: any) {
     try {
       if (!body.access_token || !body.refresh_token) {
         throw new BadRequestException('access_token e refresh_token são obrigatórios');
       }
 
-      this.blingService.setTokens(body);
+      await this.blingService.setTokens(body);
 
       this.logger.log('Tokens definidos manualmente');
       return {
@@ -390,7 +333,7 @@ export class BlingController {
   @Post('configurar-servico')
   async configurarCodigoServico(@Body() data: { codigo: string, parcela?: number }) {
     try {
-      const sucesso = this.blingService.configurarCodigoServico(data.codigo);
+      const sucesso = await this.blingService.configurarCodigoServico(data.codigo);
 
       if (!sucesso) {
         return {
@@ -400,7 +343,7 @@ export class BlingController {
       }
 
       if (data.parcela !== undefined) {
-        const sucessoParcela = this.blingService.configurarParcela(data.parcela);
+        const sucessoParcela = await this.blingService.configurarParcela(data.parcela);
         if (!sucessoParcela) {
           return {
             success: false,
@@ -431,7 +374,7 @@ export class BlingController {
   @Post('configurar-parcela')
   async configurarParcela(@Body() data: { parcela: number }) {
     try {
-      const sucesso = this.blingService.configurarParcela(data.parcela);
+      const sucesso = await this.blingService.configurarParcela(data.parcela);
 
       if (!sucesso) {
         return {
@@ -552,7 +495,7 @@ export class BlingController {
   async gerarRPS(@Body() body: { pedidoIds: number[] }) {
     try {
       console.log('🔵 [Controller gerar-rps] Body recebido:', JSON.stringify(body, null, 2));
-      
+
       if (!body.pedidoIds || !Array.isArray(body.pedidoIds) || body.pedidoIds.length === 0) {
         console.log('🔴 [Controller gerar-rps] Erro: pedidoIds inválido');
         throw new BadRequestException('pedidoIds deve ser um array com ao menos um ID');
@@ -562,7 +505,7 @@ export class BlingController {
       console.log('🔵 [Controller gerar-rps] Chamando service.gerarRPSParaPedidos...');
 
       const resultado = await this.blingService.gerarRPSParaPedidos(body.pedidoIds);
-      
+
       console.log('🟢 [Controller gerar-rps] Resultado:', JSON.stringify(resultado, null, 2));
 
       return resultado;
@@ -579,6 +522,7 @@ export class BlingController {
    */
   @UseGuards(JwtAuthGuard)
   @Get('fila-rps')
+  @LocalAccountRead()
   async getFilaRPS(
     @Query('pagina') pagina?: string,
     @Query('limite') limite?: string,
@@ -638,6 +582,7 @@ export class BlingController {
    */
   @UseGuards(JwtAuthGuard)
   @Get('fila-rps/estatisticas')
+  @LocalAccountRead()
   async getEstatisticasRPS() {
     try {
       const estatisticas = await this.rpsService.obterEstatisticas();
@@ -682,6 +627,17 @@ export class BlingController {
     } catch (error) {
       this.logger.error(`Erro ao sincronizar NFSe: ${error.message}`);
       throw new BadRequestException(`Erro ao sincronizar NFSe: ${error.message}`);
+    }
+  }
+
+  @Post('fila-rps/:id/resetar')
+  async resetarProcessamentoRps(@Param('id') id: string) {
+    const rpsId = Number(id);
+    if (!Number.isSafeInteger(rpsId) || rpsId <= 0) throw new BadRequestException('RPS inválido.');
+    try { return await this.blingService.resetarProcessamentoRps(rpsId); }
+    catch (error) {
+      if (error instanceof BadRequestException) throw error;
+      throw new BadRequestException('Não foi possível confirmar a situação no Bling. O status em processamento foi preservado. Tente novamente em instantes.');
     }
   }
 }

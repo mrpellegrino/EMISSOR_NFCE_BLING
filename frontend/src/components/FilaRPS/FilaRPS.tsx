@@ -1,5 +1,7 @@
-import { useState, useEffect, useCallback } from 'react';
-import { getFilaRPS, enviarNFSeParaPrefeitura, sincronizarStatusNFSe } from '../../services/blingApi';
+import { useBlingApi } from '../Accounts/BlingContext';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import type { RpsAutomationStatus } from '../../services/blingApi';
+
 import './FilaRPS.css';
 
 interface FilaRPSProps {
@@ -19,19 +21,35 @@ interface ItemFila {
 }
 
 function FilaRPS({ onBack }: FilaRPSProps) {
+  const { getFilaRPS, getRpsAutomationStatus, setRpsAutomation, enviarNFSeParaPrefeitura, sincronizarStatusNFSe, resetarProcessamentoRps } = useBlingApi();
   const [itens, setItens] = useState<ItemFila[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [processando, setProcessando] = useState(false);
+  const [resumoSincronizacao, setResumoSincronizacao] = useState('');
+  const [resetandoId, setResetandoId] = useState<string | null>(null);
+  const [resumoReset, setResumoReset] = useState('');
   const [filtroStatus, setFiltroStatus] = useState<string | null>(null);
 
-  const carregarFila = useCallback(async () => {
-    try {
-      setLoading(true);
-      setError(null);
+  const [automacao, setAutomacao] = useState<RpsAutomationStatus | null>(null);
+  const [alterandoAutomacao, setAlterandoAutomacao] = useState(false);
+  const [erroAutomacao, setErroAutomacao] = useState('');
+  const automacaoVersao = useRef(0);
+  const carregando = useRef(false);
 
-      const response = await getFilaRPS({ pagina: 1, limite: 10000 });
+  const carregarFila = useCallback(async (silencioso = false) => {
+    if (carregando.current) return;
+    carregando.current = true;
+    const versao = automacaoVersao.current;
+    try {
+      if (!silencioso) setLoading(true);
+
+      const [response, statusAutomacao] = await Promise.all([
+        getFilaRPS({ pagina: 1, limite: 10000 }), getRpsAutomationStatus(),
+      ]);
+      if (versao === automacaoVersao.current) setAutomacao(statusAutomacao);
+      setError(null);
 
       // Transformar dados da API para o formato ItemFila
       const itensTransformados: ItemFila[] = response.data.map((item: any) => ({
@@ -43,26 +61,71 @@ function FilaRPS({ onBack }: FilaRPSProps) {
         valor: parseFloat(item.valorTotal),
         dataInclusao: item.createdAt,
         status: item.status as 'pendente' | 'processando' | 'emitido' | 'erro',
-        mensagemErro: item.mensagemErro
+        mensagemErro: item.mensagemErro || undefined
       }));
 
       setItens(itensTransformados);
+      setSelectedIds(previous => new Set([...previous].filter(id => itensTransformados.some(
+        item => item.id === id && (item.status === 'pendente' || item.status === 'erro'),
+      ))));
     } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
       setError(err instanceof Error ? err.message : 'Erro ao carregar fila');
     } finally {
       setLoading(false);
+      carregando.current = false;
     }
-  }, []);
+  }, [getFilaRPS, getRpsAutomationStatus]);
+
+  const alterarAutomacao = async (enabled: boolean) => {
+    if (alterandoAutomacao) return;
+    setAlterandoAutomacao(true);
+    setErroAutomacao('');
+    automacaoVersao.current++;
+    try {
+      await setRpsAutomation(enabled);
+      setAutomacao(await getRpsAutomationStatus());
+    } catch (err) {
+      if (!(err instanceof DOMException && err.name === 'AbortError')) {
+        setErroAutomacao(err instanceof Error ? err.message : 'Não foi possível alterar o envio automático.');
+      }
+    } finally {
+      automacaoVersao.current++;
+      setAlterandoAutomacao(false);
+    }
+  };
+
+  const resetarItem = async (item: ItemFila) => {
+    if (resetandoId) return;
+    setResetandoId(item.id);
+    setResumoReset('');
+    try {
+      const result = await resetarProcessamentoRps(Number(item.id));
+      setResumoReset(`Pedido #${item.numeroPedido}: ${result.message}`);
+      await carregarFila(true);
+    } catch (err) {
+      if (!(err instanceof DOMException && err.name === 'AbortError')) {
+        setResumoReset(err instanceof Error ? err.message : 'Não foi possível consultar o Bling. O status foi preservado.');
+      }
+    } finally { setResetandoId(null); }
+  };
 
   useEffect(() => {
-    carregarFila();
+    let cancelado = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const atualizar = async (silencioso: boolean) => {
+      await carregarFila(silencioso);
+      if (!cancelado) timer = setTimeout(() => { void atualizar(true); }, 5000);
+    };
+    void atualizar(false);
+    return () => { cancelado = true; clearTimeout(timer); };
   }, [carregarFila]);
 
   const handleSelectAll = (checked: boolean) => {
     if (checked) {
       // Seleciona todos que podem ser selecionados (usa itensFiltrados para respeitar o filtro atual)
       const selecionaveis = itensFiltrados
-        .filter(i => !(i.status === 'emitido' && i.numeroNFSe)) // Exclui emitidos COM número
+        .filter(i => i.status === 'pendente' || i.status === 'erro')
         .map(i => i.id);
       setSelectedIds(new Set(selecionaveis));
     } else {
@@ -82,22 +145,23 @@ function FilaRPS({ onBack }: FilaRPSProps) {
 
   const handleProcessarSelecionados = async () => {
     if (selectedIds.size === 0) return;
-    
+
     setProcessando(true);
     setError(null);
     try {
       // Converter IDs de string para number
       const rpsIds = Array.from(selectedIds).map(id => parseInt(id));
       console.log('Enviando NFSe para prefeitura:', rpsIds);
-      
+
       const resultado = await enviarNFSeParaPrefeitura(rpsIds);
       console.log('Resultado:', resultado);
-      
+
       // Recarregar lista
       await carregarFila();
       setSelectedIds(new Set());
-      
+
     } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
       setError(err instanceof Error ? err.message : 'Erro ao enviar NFSe');
     } finally {
       setProcessando(false);
@@ -107,15 +171,18 @@ function FilaRPS({ onBack }: FilaRPSProps) {
   const handleSincronizar = async () => {
     setProcessando(true);
     setError(null);
+    setResumoSincronizacao('');
     try {
       console.log('Sincronizando status das NFSe...');
       const resultado = await sincronizarStatusNFSe();
       console.log('Resultado sincronização:', resultado);
-      
+      setResumoSincronizacao(`${resultado.verificados} registros verificados; ${resultado.atualizados} atualizados; ${resultado.removidos} RPS removidos porque não existem mais no Bling. ${resultado.removidos ? 'Os pedidos foram liberados para gerar RPS novamente. ' : ''}${resultado.falhas ? `${resultado.falhas} consultas não puderam ser conciliadas; esses registros foram mantidos.` : ''}`);
+
       // Recarregar lista
       await carregarFila();
-      
+
     } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
       setError(err instanceof Error ? err.message : 'Erro ao sincronizar');
     } finally {
       setProcessando(false);
@@ -131,11 +198,11 @@ function FilaRPS({ onBack }: FilaRPSProps) {
   };
 
   const getStatusLabel = (status: string, numeroNFSe: string | null) => {
-    // Se está emitido mas não tem número de nota, mostrar como pendente
+    // A falta do número não autoriza outro envio.
     if (status === 'emitido' && !numeroNFSe) {
-      return 'Pendente';
+      return 'Emitido (aguardando número)';
     }
-    
+
     const labels: Record<string, string> = {
       'pendente': 'Pendente',
       'processando': 'Processando',
@@ -144,63 +211,23 @@ function FilaRPS({ onBack }: FilaRPSProps) {
     };
     return labels[status] || status;
   };
-  
-  // Função para obter a classe CSS do status (considerando emitidos sem número)
-  const getStatusClass = (status: string, numeroNFSe: string | null) => {
-    // Se está emitido mas não tem número de nota, mostrar como pendente
-    if (status === 'emitido' && !numeroNFSe) {
-      return 'pendente';
-    }
-    return status;
-  };
 
   const estatisticas = {
-    // Pendentes inclui: status pendente OU status emitido SEM número de nota
-    pendentes: itens.filter(i => i.status === 'pendente' || (i.status === 'emitido' && !i.numeroNFSe)).length,
+    pendentes: itens.filter(i => i.status === 'pendente').length,
     processando: itens.filter(i => i.status === 'processando').length,
-    // Emitidos são apenas os que TÊM número de nota
-    emitidos: itens.filter(i => i.status === 'emitido' && i.numeroNFSe).length,
-    erros: itens.filter(i => i.status === 'erro').length
+    emitidos: itens.filter(i => i.status === 'emitido').length,
+    erros: itens.filter(i => i.status === 'erro').length,
   };
 
-  // Função para alternar filtro
   const toggleFiltro = (status: string) => {
     setFiltroStatus(prev => prev === status ? null : status);
   };
-
-  // Itens filtrados pelo status selecionado
-  const itensFiltrados = filtroStatus 
-    ? itens.filter(i => {
-        // Lógica especial: emitidos sem número são tratados como pendentes
-        const statusEfetivo = (i.status === 'emitido' && !i.numeroNFSe) ? 'pendente' : i.status;
-        
-        if (filtroStatus === 'pendente') {
-          // Mostrar pendentes E emitidos sem número
-          return statusEfetivo === 'pendente';
-        }
-        if (filtroStatus === 'emitido') {
-          // Mostrar apenas emitidos COM número
-          return i.status === 'emitido' && i.numeroNFSe;
-        }
-        // Para outros filtros (processando, erro), usar status original
-        return i.status === filtroStatus;
-      })
-    : itens;
-
-  // Função para verificar se um item pode ser selecionado
-  // Pode selecionar: pendente, processando, erro, ou emitido SEM número de nota
-  const podeSelecionar = (item: ItemFila) => {
-    // Se é emitido COM número de nota, não pode selecionar
-    if (item.status === 'emitido' && item.numeroNFSe) {
-      return false;
-    }
-    // Todos os outros podem ser selecionados
-    return true;
-  };
+  const itensFiltrados = filtroStatus ? itens.filter(i => i.status === filtroStatus) : itens;
+  const podeSelecionar = (item: ItemFila) => item.status === 'pendente' || item.status === 'erro';
 
   // Itens que podem ser selecionados
   const itensSelecionaveis = itensFiltrados.filter(podeSelecionar);
-  const allSelecionaveisSelected = itensSelecionaveis.length > 0 && 
+  const allSelecionaveisSelected = itensSelecionaveis.length > 0 &&
     itensSelecionaveis.every(i => selectedIds.has(i.id));
 
   return (
@@ -227,9 +254,31 @@ function FilaRPS({ onBack }: FilaRPSProps) {
       </header>
 
       <main className="fila-rps-main">
+        {resumoReset && <div className="rps-automation" role="status">{resumoReset}</div>}
+        {resumoSincronizacao && <div className="rps-automation" role="status">{resumoSincronizacao}</div>}
+        <div className="rps-automation" role="status">
+          <strong>{!automacao ? 'Consultando envio automático...' : !automacao.accountEnabled ? 'Fila automática pausada' : !automacao.globalEnabled ? 'Envio automático desativado no servidor' : automacao.connected ? 'Envio automático ativo' : 'Envio automático aguardando conexão'}</strong>
+          <span>{automacao?.enabled && automacao.connected
+            ? 'Os pendentes de cada conta são enviados automaticamente. A fila é verificada a cada ' + automacao.intervalSeconds + ' segundos após o ciclo anterior, com o servidor ligado.'
+            : automacao?.enabled ? 'Conecte esta conta ao Bling nas configurações para processar os pendentes.' : 'O envio manual continua disponível.'}</span>
+          <small>Itens com erro precisam de revisão. Os itens em processamento aguardam confirmação do Bling.</small>
+          <div className="rps-automation-controls" aria-label="Controle do envio automático">
+            <button type="button" className="rps-queue-on" onClick={() => alterarAutomacao(true)}
+              disabled={!automacao || alterandoAutomacao || automacao.accountEnabled || !automacao.globalEnabled}>
+              Ligar fila
+            </button>
+            <button type="button" className="rps-queue-off" onClick={() => alterarAutomacao(false)}
+              disabled={!automacao || alterandoAutomacao || !automacao.accountEnabled}>
+              Pausar fila
+            </button>
+            {alterandoAutomacao && <span>Salvando...</span>}
+          </div>
+          <small>A pausa vale para esta conta e fica salva. Um envio já iniciado pode terminar; os próximos aguardam você ligar a fila. O envio manual continua disponível.</small>
+          {erroAutomacao && <span role="alert">{erroAutomacao}</span>}
+        </div>
         {/* Estatísticas */}
         <div className="fila-rps-stats">
-          <div 
+          <div
             className={`stat-item clickable ${filtroStatus === 'pendente' ? 'active' : ''}`}
             onClick={() => toggleFiltro('pendente')}
             title="Clique para filtrar por pendentes"
@@ -246,7 +295,7 @@ function FilaRPS({ onBack }: FilaRPSProps) {
             </div>
           </div>
 
-          <div 
+          <div
             className={`stat-item clickable ${filtroStatus === 'processando' ? 'active' : ''}`}
             onClick={() => toggleFiltro('processando')}
             title="Clique para filtrar por processando"
@@ -264,7 +313,7 @@ function FilaRPS({ onBack }: FilaRPSProps) {
             </div>
           </div>
 
-          <div 
+          <div
             className={`stat-item clickable ${filtroStatus === 'emitido' ? 'active' : ''}`}
             onClick={() => toggleFiltro('emitido')}
             title="Clique para filtrar por emitidos"
@@ -281,7 +330,7 @@ function FilaRPS({ onBack }: FilaRPSProps) {
             </div>
           </div>
 
-          <div 
+          <div
             className={`stat-item clickable ${filtroStatus === 'erro' ? 'active' : ''}`}
             onClick={() => toggleFiltro('erro')}
             title="Clique para filtrar por erros"
@@ -303,8 +352,8 @@ function FilaRPS({ onBack }: FilaRPSProps) {
         {/* Barra de Ações */}
         <div className="actions-bar">
           <div className="actions-left">
-            <button 
-              className="action-btn primary" 
+            <button
+              className="action-btn primary"
               onClick={handleProcessarSelecionados}
               disabled={selectedIds.size === 0 || processando}
             >
@@ -325,9 +374,9 @@ function FilaRPS({ onBack }: FilaRPSProps) {
                 </>
               )}
             </button>
-            
-            <button 
-              className="action-btn secondary" 
+
+            <button
+              className="action-btn secondary"
               onClick={handleSincronizar}
               disabled={processando}
               title="Sincronizar status das NFSe com o Bling"
@@ -341,9 +390,9 @@ function FilaRPS({ onBack }: FilaRPSProps) {
             </button>
           </div>
 
-          <button 
-            className={`refresh-btn ${loading ? 'loading' : ''}`} 
-            onClick={carregarFila}
+          <button
+            className={`refresh-btn ${loading ? 'loading' : ''}`}
+            onClick={() => void carregarFila()}
             disabled={loading}
           >
             <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -370,7 +419,7 @@ function FilaRPS({ onBack }: FilaRPSProps) {
                 <path d="M9 9L15 15" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
               </svg>
               <p>{error}</p>
-              <button className="action-btn secondary" onClick={carregarFila}>
+              <button className="action-btn secondary" onClick={() => void carregarFila()}>
                 Tentar novamente
               </button>
             </div>
@@ -388,8 +437,8 @@ function FilaRPS({ onBack }: FilaRPSProps) {
               <thead>
                 <tr>
                   <th className="checkbox-cell">
-                    <input 
-                      type="checkbox" 
+                    <input
+                      type="checkbox"
                       checked={allSelecionaveisSelected}
                       onChange={(e) => handleSelectAll(e.target.checked)}
                       disabled={itensSelecionaveis.length === 0}
@@ -408,8 +457,8 @@ function FilaRPS({ onBack }: FilaRPSProps) {
                 {itensFiltrados.map((item) => (
                   <tr key={item.id} className={selectedIds.has(item.id) ? 'selected' : ''}>
                     <td className="checkbox-cell">
-                      <input 
-                        type="checkbox" 
+                      <input
+                        type="checkbox"
                         checked={selectedIds.has(item.id)}
                         onChange={(e) => handleSelectItem(item.id, e.target.checked)}
                         disabled={!podeSelecionar(item)}
@@ -422,9 +471,16 @@ function FilaRPS({ onBack }: FilaRPSProps) {
                     <td>{formatarValor(item.valor)}</td>
                     <td>{formatarData(item.dataInclusao)}</td>
                     <td>
-                      <span className={`status-badge ${getStatusClass(item.status, item.numeroNFSe)}`}>
+                      <span className={`status-badge ${item.status}`}>
                         {getStatusLabel(item.status, item.numeroNFSe)}
                       </span>
+                      {item.mensagemErro && <small className="rps-item-error">{item.mensagemErro}</small>}
+                      {item.status === 'processando' && <button type="button" className="rps-reset-button"
+                        aria-label={`Resetar processamento do pedido ${item.numeroPedido}`}
+                        title="Consulta o Bling e atualiza o status. Sem confirmação, libera para revisão manual sem reenviar a nota."
+                        disabled={processando || resetandoId !== null} onClick={() => void resetarItem(item)}>
+                        {resetandoId === item.id ? 'Consultando Bling…' : 'Resetar'}
+                      </button>}
                     </td>
                   </tr>
                 ))}

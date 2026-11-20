@@ -1,3 +1,4 @@
+import { Accounts } from './components/Accounts/Accounts';
 import { useState, useEffect } from 'react';
 import Login from './components/Login';
 import Register from './components/Register';
@@ -5,9 +6,21 @@ import Dashboard from './components/Dashboard';
 import { Settings } from './components/Settings';
 import { PedidosVenda } from './components/PedidosVenda';
 import { FilaRPS } from './components/FilaRPS';
+import { CrmLeads } from './components/OfficeModules/CrmLeads';
+import { PaidTraffic } from './components/OfficeModules/PaidTraffic';
+import { McpHub } from './components/OfficeModules/McpHub';
 import { authApi } from './services/authApi';
 
-type AppView = 'login' | 'register' | 'dashboard' | 'settings' | 'pedidos-venda' | 'fila-rps';
+type AppView =
+  | 'login'
+  | 'register'
+  | 'dashboard'
+  | 'settings'
+  | 'pedidos-venda'
+  | 'fila-rps'
+  | 'crm'
+  | 'ads'
+  | 'mcp';
 
 interface User {
   id: string;
@@ -27,11 +40,21 @@ function App() {
         const isValid = await authApi.validateToken();
         if (isValid) {
           setUser(authApi.getUser());
-          
+
           // Verifica se está na rota de settings (callback OAuth)
           const path = window.location.pathname;
           if (path === '/settings' || window.location.search.includes('bling=')) {
             setCurrentView('settings');
+          } else if (path === '/fila-rps') {
+            setCurrentView('fila-rps');
+          } else if (path === '/pedidos-venda') {
+            setCurrentView('pedidos-venda');
+          } else if (path === '/crm') {
+            setCurrentView('crm');
+          } else if (path === '/ads') {
+            setCurrentView('ads');
+          } else if (path === '/mcp') {
+            setCurrentView('mcp');
           } else {
             setCurrentView('dashboard');
           }
@@ -91,6 +114,26 @@ function App() {
     window.history.pushState({}, '', '/');
   };
 
+  const handleGoToCrm = () => {
+    setCurrentView('crm');
+    window.history.pushState({}, '', '/crm');
+  };
+
+  const handleGoToAds = () => {
+    setCurrentView('ads');
+    window.history.pushState({}, '', '/ads');
+  };
+
+  const handleGoToMcp = () => {
+    setCurrentView('mcp');
+    window.history.pushState({}, '', '/mcp');
+  };
+
+  const handleBackToDashboard = () => {
+    setCurrentView('dashboard');
+    window.history.pushState({}, '', '/');
+  };
+
   if (isLoading) {
     return (
       <div style={{
@@ -117,42 +160,33 @@ function App() {
     );
   }
 
-  // Rotas autenticadas
   if (user) {
-    if (currentView === 'settings') {
-      return <Settings onBack={handleBackFromSettings} />;
-    }
-    if (currentView === 'pedidos-venda') {
-      return <PedidosVenda onBack={handleBackFromPedidosVenda} />;
-    }
-    if (currentView === 'fila-rps') {
-      return <FilaRPS onBack={handleBackFromFilaRPS} />;
-    }
-    return (
-      <Dashboard 
-        user={user} 
-        onLogout={handleLogout} 
-        onGoToSettings={handleGoToSettings}
-        onGoToPedidosVenda={handleGoToPedidosVenda}
-        onGoToFilaRPS={handleGoToFilaRPS}
-      />
-    );
+    const screen = currentView === 'settings' ? <Settings onBack={handleBackFromSettings} />
+      : currentView === 'pedidos-venda' ? <PedidosVenda onBack={handleBackFromPedidosVenda} />
+      : currentView === 'fila-rps' ? <FilaRPS onBack={handleBackFromFilaRPS} />
+      : currentView === 'crm' ? <CrmLeads onBack={handleBackToDashboard} />
+      : currentView === 'ads' ? <PaidTraffic onBack={handleBackToDashboard} />
+      : currentView === 'mcp' ? <McpHub onBack={handleBackToDashboard} />
+      : <Dashboard user={user} onLogout={handleLogout} onGoToSettings={handleGoToSettings}
+          onGoToPedidosVenda={handleGoToPedidosVenda} onGoToFilaRPS={handleGoToFilaRPS}
+          onGoToCrm={handleGoToCrm} onGoToAds={handleGoToAds} onGoToMcp={handleGoToMcp} />;
+    return <Accounts key={user.id} userId={user.id} onCreated={handleGoToSettings} onLogout={handleLogout}>{screen}</Accounts>;
   }
 
   // Rotas não autenticadas
   if (currentView === 'register') {
     return (
-      <Register 
-        onRegisterSuccess={handleRegisterSuccess} 
-        onBackToLogin={() => setCurrentView('login')} 
+      <Register
+        onRegisterSuccess={handleRegisterSuccess}
+        onBackToLogin={() => setCurrentView('login')}
       />
     );
   }
 
   return (
-    <Login 
-      onLoginSuccess={handleLoginSuccess} 
-      onGoToRegister={() => setCurrentView('register')} 
+    <Login
+      onLoginSuccess={handleLoginSuccess}
+      onGoToRegister={() => setCurrentView('register')}
     />
   );
 }
